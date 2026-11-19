@@ -13,6 +13,7 @@ function slimComponent(c) {
   return {
     uid: c.uid,
     designator: c.designator,
+    page: c.page || null,
     category: c.category,
     categoryConfidence: c.categoryConfidence,
     categoryBasis: c.categoryBasis,

@@ -130,8 +130,9 @@ or in English:
 Review the current schematic.
 ```
 
-Claude Code reads [SKILL.md](SKILL.md), collects the data, runs the rules,
-reviews the netlist packet by packet, and tells you where the report is.
+Claude Code reads [SKILL.md](SKILL.md), asks where you want the report saved,
+collects the data, runs the rules, reviews the netlist packet by packet, and
+tells you the final report path.
 
 Useful prompts:
 
@@ -143,9 +144,10 @@ Useful prompts:
 | Review one component | “重点看 U1” / “Focus on U1” |
 | Review an exported netlist | “审查 D:\designs\board.enet” / “Review D:\designs\board.enet” |
 
-Reports are written to `tmp/schematic-review/<runId>/report.html` under the
-folder where the command runs. Open that file in any browser; no server or
-network is required.
+Reports default to `tmp/schematic-review/<runId>/report.html` under the folder
+where the command runs; the agent asks for a destination first and falls back to
+this default only if you have no preference. Open that file in any browser; no
+server or network is required.
 
 #### Option B — Command line
 
@@ -213,6 +215,8 @@ Add `--no-ai` to `standard`/`strict` to keep all rules but skip the AI step.
 | `--max-findings N` | Cap P2/P3 findings (P0/P1 are never truncated) |
 | `--max-p0 N`, `--max-p1 N`, `--strict-exit` | CI thresholds; exit code 10 when exceeded |
 | `--fail-partial` | Exit code 6 when AI coverage is partial |
+| `--model <name>` | Review model shown in the report (or `SCHEMATIC_REVIEW_MODEL`) |
+| `--tokens-in N` / `--tokens-out N` | Exact review token usage shown in the report (or `SCHEMATIC_REVIEW_TOKENS_IN/OUT`) |
 
 The full flag list is in [SKILL.md](SKILL.md).
 
@@ -481,8 +485,8 @@ curl http://127.0.0.1:49620/health
 Review the current schematic.
 ```
 
-Claude Code 会读取 [SKILL.md](SKILL.md)，自动完成取数、规则检查、逐包 AI 审查，
-最后告诉你报告路径。
+Claude Code 会读取 [SKILL.md](SKILL.md)，先询问报告输出目录，再自动完成取数、
+规则检查、逐包 AI 审查，最后告诉你报告路径。
 
 常用说法：
 
@@ -495,7 +499,8 @@ Claude Code 会读取 [SKILL.md](SKILL.md)，自动完成取数、规则检查�
 | 审查导出的网表 | “审查 D:\designs\board.enet” |
 
 报告默认写到运行目录下的
-`tmp/schematic-review/<runId>/report.html`。双击即可用浏览器打开，不需要
+`tmp/schematic-review/<runId>/report.html`；Claude Code 会先询问你希望保存到
+哪个目录，只有你表示无所谓时才使用默认位置。双击即可用浏览器打开，不需要
 服务器或网络。
 
 #### 方式二：命令行
@@ -563,6 +568,8 @@ node "$SKILL_DIR/scripts/review.mjs" run \
 | `--max-findings N` | 限制 P2/P3 数量（P0/P1 永不截断） |
 | `--max-p0 N`、`--max-p1 N`、`--strict-exit` | CI 阈值，超限退出码 10 |
 | `--fail-partial` | AI 覆盖不完整时退出码 6 |
+| `--model <name>` | 报告中显示的审查模型（也可用 `SCHEMATIC_REVIEW_MODEL`） |
+| `--tokens-in N` / `--tokens-out N` | 报告中显示的精确 Token 消耗（也可用 `SCHEMATIC_REVIEW_TOKENS_IN/OUT`） |
 
 完整参数表见 [SKILL.md](SKILL.md)。
 

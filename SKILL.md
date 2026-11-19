@@ -31,26 +31,30 @@ netlist review, or provides an `.enet` file. If the user provides a `.net`
 
 ## Quick start
 
+Before running, **ask the user where the report should be written** and pass that
+path as `--out <dir>`. Only fall back to `tmp/schematic-review/<runId>` when the
+user says any location is fine. Never write into the EasyEDA project directory
+unless the user explicitly asks and accepts the risk.
+
 From the project root, replace `$SKILL_DIR` with this skill's directory
 (e.g. `D:\tempfile\test-skill\easyeda-schematic-review`):
 
 ```bash
 # Live review, default standard mode (rules + AI, pauses for packets)
-node "$SKILL_DIR/scripts/review.mjs" run --source live
+node "$SKILL_DIR/scripts/review.mjs" run --source live --out <user-chosen-dir>
 
 # Fast rules-only review, one command
-node "$SKILL_DIR/scripts/review.mjs" run --source live --mode quick
+node "$SKILL_DIR/scripts/review.mjs" run --source live --mode quick --out <user-chosen-dir>
 
 # Offline review from an exported netlist
-node "$SKILL_DIR/scripts/review.mjs" run --source file --netlist design.enet --mode quick
+node "$SKILL_DIR/scripts/review.mjs" run --source file --netlist design.enet --mode quick --out <user-chosen-dir>
 
 # Resume after AI packets are written
-node "$SKILL_DIR/scripts/review.mjs" run --resume --out tmp/schematic-review/<runId>
+node "$SKILL_DIR/scripts/review.mjs" run --resume --out <runDir>
 ```
 
-Reports are written to `tmp/schematic-review/<runId>/report.html`. Never write
-into the EasyEDA project directory unless the user explicitly asks and accepts
-the risk.
+Reports are written to `<runDir>/report.html`. Only use the default
+`tmp/schematic-review/<runId>` location when the user delegated the choice.
 
 ## Standard-mode workflow (AI review)
 
@@ -65,7 +69,10 @@ the risk.
      `references/ai-prompts.md`.
    - Then mark progress: `node scripts/review.mjs ai-done --out <runDir> --packet <fileKey> --status done`
      (or `--status failed` if the packet cannot be reviewed).
-3. After all packets, run `node scripts/review.mjs run --resume --out <runDir>`.
+3. After all packets, run
+   `node scripts/review.mjs run --resume --out <runDir> --model <model-id> [--tokens-in N --tokens-out N]`.
+   Pass the model id and, when the session exposes them, the exact token counts for
+   this review; the report shows model, total duration, and token usage in its header.
 4. Tell the user the report path, P0/P1 counts, and any partial coverage.
 
 If the user asks for "quick", "no AI", or privacy-safe review, use
@@ -116,6 +123,8 @@ See `references/ai-prompts.md` for the exact output schema and prompt template.
 | `--max-p0 N`, `--max-p1 N`, `--strict-exit` | report | CI thresholds; over limit exits 10 |
 | `--fail-partial` | run/report | partial report exits 6 |
 | `--self-contained` | report | inline screenshots as base64 |
+| `--model <name>` | run/report | review model id (also `SCHEMATIC_REVIEW_MODEL`) |
+| `--tokens-in N` / `--tokens-out N` | run/report | exact review token usage (also `SCHEMATIC_REVIEW_TOKENS_IN/OUT`) |
 | `--start-bridge` | live | start Bridge only with explicit user consent |
 
 Exit codes: `0` success, `1` generic, `2` environment/Bridge, `3` netlist
@@ -138,6 +147,14 @@ If multiple EDA windows are connected, ask the user which one to use and pass
 ## Report and screenshots
 
 - Default report directory: `tmp/schematic-review/<runId>/`.
+- Findings show the schematic name and page name (`Schematic1 / P1`) whenever
+  geometry is available; page names come from `getAllSchematicPagesInfo()` /
+  `getAllSchematicsInfo()`, not from `getCurrentDocumentInfo()` (which has no name).
+- The report header shows the review model, total duration (start of `run` to
+  report generation), and token usage. Exact counts come from
+  `review-context.json` / `--tokens-in/--tokens-out`; when absent they are
+  estimated from reviewed packet sizes and AI output files and marked as such.
+  `run`, `report`, and `ai-done` update `review-context.json` automatically.
 - CSS/JS are always inlined; screenshots are SVG files by default.
 - Capture reads the cached `page-*.svg` and `model.geometry`; it does not call
   EDA again. If geometry is missing, the finding shows a placeholder, never a

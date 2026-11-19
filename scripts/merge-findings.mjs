@@ -88,10 +88,29 @@ function scopeMatches(finding, scope, model) {
   });
 }
 
+function attachDerivedPages(finding, model) {
+  finding.location = finding.location || { pages: [], designators: [], uids: [], nets: [] };
+  if ((finding.location.pages || []).length) return;
+  const pageNames = new Set();
+  for (const uid of finding.location.uids || []) {
+    const comp = model.components.find(c => c.uid === uid);
+    if (comp?.page) pageNames.add(comp.page);
+  }
+  if (!pageNames.size) {
+    for (const designator of finding.location.designators || []) {
+      for (const comp of model.components) {
+        if (comp.designator === designator && comp.page) pageNames.add(comp.page);
+      }
+    }
+  }
+  finding.location.pages = [...pageNames];
+}
+
 function readAiFindings(aiDir, model, lang) {
   const accepted = [];
   const rejected = [];
-  if (!aiDir || !fs.existsSync(aiDir)) return { accepted, rejected };
+  const openQuestions = [];
+  if (!aiDir || !fs.existsSync(aiDir)) return { accepted, rejected, openQuestions };
   const files = fs.readdirSync(aiDir).filter(f => /^findings\.ai\..*\.json$/i.test(f));
   for (const file of files) {
     const packetKey = file.replace(/^findings\.ai\./i, '').replace(/\.json$/i, '');
@@ -99,6 +118,9 @@ function readAiFindings(aiDir, model, lang) {
     try { data = readJson(path.join(aiDir, file)); } catch (err) {
       rejected.push({ file, reason: `invalid json: ${err.message}` });
       continue;
+    }
+    if (!Array.isArray(data)) {
+      for (const q of data.open_questions || []) openQuestions.push(q);
     }
     const list = Array.isArray(data) ? data : (data.findings || []);
     for (const raw of list) {
@@ -117,7 +139,8 @@ function readAiFindings(aiDir, model, lang) {
       else accepted.push(f);
     }
   }
-  return { accepted, rejected };
+  for (const f of accepted) attachDerivedPages(f, model);
+  return { accepted, rejected, openQuestions };
 }
 
 function coverageFromPackets(outDir, packetsManifest, model) {
@@ -172,7 +195,7 @@ export function mergeFindings(options = {}) {
   const lint = readJson(path.join(outDir, 'lint.json'), { findings: [], openQuestions: [], coverage: {} });
   const packetsManifest = fs.existsSync(path.join(outDir, 'packets', 'manifest.json'))
     ? readJson(path.join(outDir, 'packets', 'manifest.json')) : null;
-  const { accepted: aiFindings, rejected } = readAiFindings(options.aiDir, model, lang);
+  const { accepted: aiFindings, rejected, openQuestions: aiOpenQuestions } = readAiFindings(options.aiDir, model, lang);
 
   const ruleFindings = (lint.findings || []).map(f => ({
     ...f,
@@ -232,6 +255,7 @@ export function mergeFindings(options = {}) {
     questions.push(typeof q === 'string' ? { question: q, related: [], why: '' } : q);
   };
   for (const q of lint.openQuestions || []) addQ(q);
+  for (const q of aiOpenQuestions) addQ(q);
   for (const f of aiFindings) for (const q of f.open_questions || f.questions || []) addQ(q);
   const openQuestions = questions.slice(0, 15);
   const omittedQuestions = Math.max(0, questions.length - openQuestions.length);

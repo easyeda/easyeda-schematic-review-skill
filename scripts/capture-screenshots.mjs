@@ -19,10 +19,21 @@ function unionBoxes(boxes) {
   };
 }
 
+function pageLabel(page) {
+  const pageName = page?.pageName || null;
+  const schematicName = page?.schematicName || null;
+  if (schematicName && pageName) return `${schematicName} / ${pageName}`;
+  return pageName || schematicName || null;
+}
+
 function choosePage(finding, model) {
   const pages = model.geometry?.pages || {};
   const locPages = finding.location?.pages || [];
-  for (const p of locPages) if (pages[p]) return { key: p, page: pages[p] };
+  for (const p of locPages) {
+    if (pages[p]) return { key: p, page: pages[p] };
+    const hit = Object.entries(pages).find(([, page]) => page.pageName === p || page.pageFileKey === p);
+    if (hit) return { key: hit[0], page: hit[1] };
+  }
   const uids = new Set(finding.location?.uids || []);
   for (const [key, page] of Object.entries(pages)) {
     if ([...uids].some(u => page.components?.[u])) return { key, page };
@@ -153,13 +164,14 @@ export function captureScreenshots(options = {}) {
     fs.writeFileSync(path.join(outDir, fileName), cropped.svg, 'utf8');
     const labels = uids.map(u => page.components[u]?.designator).filter(Boolean);
     const captionLabel = labels.length ? labels.join('、') : ((finding.location?.nets || [])[0] || '—');
+    const label = pageLabel(page);
     finding.screenshots = [{
       id: `${finding.id}-shot-1`,
       file: fileName,
       png: null,
       svg: fileName,
-      page: page.pageName || key,
-      caption: `红框为相关器件：${captionLabel}`,
+      page: label || page.pageName || key,
+      caption: `${label ? `${label} · ` : ''}红框为相关器件：${captionLabel}`,
       highlights: labels,
       viewBox: cropped.viewBox,
     }];

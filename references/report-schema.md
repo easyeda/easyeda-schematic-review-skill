@@ -32,9 +32,11 @@
   "drcAvailable": true,
   "geometry": {
     "currentPage": "P1",
+    "currentSchematic": "Schematic1",
     "pages": {
       "P1": {
         "pageUuid": "", "pageName": "P1", "pageFileKey": "P1",
+        "schematicUuid": "", "schematicName": "Schematic1",
         "pageWidth": 1170, "pageHeight": 825,
         "svgViewBox": "-10.5 -835.5 1191 846",
         "svgPath": "page-P1.svg", "pngPath": null,
@@ -120,6 +122,10 @@
 - `screenshots[]`、`screenshotPlaceholder`；
 - `aiEnhancement`（若 AI 补充了规则 finding）。
 
+`finding.location.pages` 保存图页名称（如 `P1`），规则与 AI finding 缺省时由
+`model.components[].page` 自动推导；报告用 `geometry.pages[].schematicName`
+显示为 `Schematic1 / P1`。
+
 `coverage` 包含 `componentPercent/netPercent`、`packetsReviewed/Skipped/Failed`、
 `partial`、`skippedRules`、`suppressedFindings`、`omittedFindings`、`omittedQuestions`。
 
@@ -138,10 +144,20 @@
   "findings": [],
   "openQuestions": [],
   "coverage": {},
+  "review": {
+    "model": "claude-sonnet-5-5",
+    "startedAt": "", "endedAt": "", "durationMs": 0,
+    "tokens": { "input": 0, "output": 0, "total": 0 },
+    "tokensEstimated": false
+  },
   "screenshots": { "generated": 0, "failed": 0, "skipped": 0 },
   "artifacts": [{ "path": "report.html", "type": "report", "sha256": "", "bytes": 0 }]
 }
 ```
+
+`review` 来自 `review-context.json`（`--model`、`--tokens-in/--tokens-out` 可覆盖）：
+`durationMs = endedAt - startedAt`；`tokens` 缺失时用已完成 packet 的
+`estimated_tokens` 与 AI 输出文件估算，并置 `tokensEstimated: true`。
 
 ## `manifest.json`
 

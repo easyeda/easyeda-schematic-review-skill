@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   readJson, writeJson, writeText, escapeHtml, sha256, skillVersion, fileEntry, ensureDir,
+  fmtDuration, estimateTokens, numArg,
 } from './lib/util.mjs';
 import { loadMessages, t, localizeFinding } from './lib/i18n.mjs';
 
@@ -12,6 +13,103 @@ function pct(v) {
   const n = Number(v);
   if (!Number.isFinite(n)) return '—';
   return `${Math.round(n * 100)}%`;
+}
+
+function buildPageLabels(model) {
+  const labels = new Map();
+  for (const page of Object.values(model.geometry?.pages || {})) {
+    const name = page?.pageName;
+    if (!name || labels.has(name)) continue;
+    labels.set(name, page.schematicName ? `${page.schematicName} / ${name}` : name);
+  }
+  const current = model.geometry?.currentPage;
+  if (current && !labels.has(current)) {
+    labels.set(current, model.geometry?.currentSchematic ? `${model.geometry.currentSchematic} / ${current}` : current);
+  }
+  return labels;
+}
+
+function pageDisplayName(name, pageLabels) {
+  return pageLabels.get(name) || name;
+}
+
+function normalizeTokens(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const input = numArg(raw.input ?? raw.inputTokens ?? raw.input_tokens, null);
+  const output = numArg(raw.output ?? raw.outputTokens ?? raw.output_tokens, null);
+  const total = numArg(raw.total ?? raw.totalTokens ?? raw.total_tokens, null);
+  if (input == null && output == null && total == null) return null;
+  const i = input ?? 0;
+  const o = output ?? 0;
+  return { input: i, output: o, total: total ?? (i + o) };
+}
+
+/** Best-effort token usage when the review session did not record exact counts. */
+function estimateTokensUsed(outDir) {
+  const progressFile = path.join(outDir, 'progress.json');
+  const progress = fs.existsSync(progressFile) ? readJson(progressFile, {}) : {};
+  const reviewed = new Set(Object.entries(progress)
+    .filter(([, v]) => v && v.status === 'done').map(([k]) => k));
+  const packetsManifest = readJson(path.join(outDir, 'packets', 'manifest.json'), {});
+  let input = 0;
+  if (reviewed.size) {
+    for (const packet of packetsManifest.packets || []) {
+      if (reviewed.has(packet.fileKey) || reviewed.has(packet.packet_id)) {
+        input += Number(packet.estimated_tokens) || 0;
+      }
+    }
+  }
+  let output = 0;
+  const aiDir = path.join(outDir, 'ai');
+  if (fs.existsSync(aiDir)) {
+    for (const file of fs.readdirSync(aiDir)) {
+      if (!/^findings\.ai\..*\.json$/i.test(file)) continue;
+      try { output += estimateTokens(fs.readFileSync(path.join(aiDir, file), 'utf8')); } catch { /* ignore */ }
+    }
+  }
+  if (!input && !output) return null;
+  return { input, output, total: input + output };
+}
+
+function readReviewMeta(outDir) {
+  const manifest = readJson(path.join(outDir, 'manifest.json'), {});
+  const context = readJson(path.join(outDir, 'review-context.json'), {});
+  const model = context.model || process.env.SCHEMATIC_REVIEW_MODEL || manifest.model || 'unknown';
+  const startedAt = context.startedAt || manifest.runAt || null;
+  const endedAt = context.endedAt || new Date().toISOString();
+  let durationMs = numArg(context.durationMs, null);
+  if (durationMs == null && startedAt) {
+    const start = Date.parse(startedAt);
+    const end = Date.parse(endedAt);
+    if (Number.isFinite(start) && Number.isFinite(end) && end >= start) durationMs = end - start;
+  }
+  let tokens = normalizeTokens(context.tokens || context.usage);
+  let tokensEstimated = false;
+  if (!tokens) {
+    tokens = estimateTokensUsed(outDir);
+    tokensEstimated = Boolean(tokens);
+  }
+  return { model, startedAt, endedAt, durationMs, tokens, tokensEstimated };
+}
+
+function fmtCount(n) {
+  return Number.isFinite(n) ? n.toLocaleString('en-US') : '—';
+}
+
+function renderReviewMeta(review, messages) {
+  const unknown = t(messages, 'report.meta.unknown');
+  const durationText = review.durationMs != null ? fmtDuration(review.durationMs) : unknown;
+  const tokensText = review.tokens
+    ? `${t(messages, 'report.tokens.input')} ${fmtCount(review.tokens.input)} · ` +
+      `${t(messages, 'report.tokens.output')} ${fmtCount(review.tokens.output)} · ` +
+      `${t(messages, 'report.tokens.total')} ${fmtCount(review.tokens.total)}` +
+      (review.tokensEstimated ? ` (${t(messages, 'report.tokens.estimated')})` : '')
+    : unknown;
+  return `<div class="review-meta">
+      <span><span class="meta-label">${escapeHtml(t(messages, 'report.meta.model'))}</span>${escapeHtml(review.model)}</span>
+      <span><span class="meta-label">${escapeHtml(t(messages, 'report.meta.duration'))}</span>${escapeHtml(durationText)}</span>
+      <span><span class="meta-label">${escapeHtml(t(messages, 'report.meta.tokens'))}</span>${escapeHtml(tokensText)}</span>
+    </div>`;
 }
 
 function severityLabel(sev, messages) {
@@ -59,12 +157,12 @@ function screenshotHtml(finding, { selfContained, outDir, messages }) {
 }
 
 function renderFinding(f, opts) {
-  const { messages, selfContained, outDir, idx } = opts;
+  const { messages, selfContained, outDir, idx, pageLabels } = opts;
   const loc = f.location || {};
-  const pages = (loc.pages || []).join(', ');
+  const pages = (loc.pages || []).map(p => pageDisplayName(p, pageLabels)).join(', ');
   const designators = (loc.designators || []).join(', ');
   const nets = (loc.nets || []).join(', ');
-  const search = [f.title, f.ruleId, ...(loc.designators || []), ...(loc.nets || []), ...(loc.pages || [])].join(' ').toLowerCase();
+  const search = [f.title, f.ruleId, ...(loc.designators || []), ...(loc.nets || []), ...(loc.pages || []), pages].join(' ').toLowerCase();
   const sourceLabel = t(messages, `report.source.${f.source || 'rule'}`);
   const tags = [
     f.ruleId ? `<span class="tag">${escapeHtml(f.ruleId)}</span>` : '',
@@ -89,7 +187,7 @@ function renderFinding(f, opts) {
       </div>
       <div>
         ${screenshotHtml(f, { selfContained, outDir, messages })}
-        ${designators || nets ? `<p class="note">${escapeHtml(t(messages, 'report.location'))}: ${escapeHtml([designators, nets].filter(Boolean).join(' / '))}</p>` : ''}
+        ${pages || designators || nets ? `<p class="note">${escapeHtml(t(messages, 'report.location'))}: ${escapeHtml([pages, designators, nets].filter(Boolean).join(' / '))}</p>` : ''}
       </div>
     </div>
     <div class="review-box">
@@ -102,17 +200,20 @@ function renderFinding(f, opts) {
   </article>`;
 }
 
-function renderTop3(findings, model, messages) {
+function renderTop3(findings, model, messages, pageLabels) {
   const top = findings.filter(f => ['P0', 'P1'].includes(f.severity)).slice(0, 3);
   if (!top.length) {
     return `<div class="top3"><div class="top-card empty"><span class="rank">Top 3</span><h3>${escapeHtml(t(messages, 'report.top3.empty'))}</h3><p class="note">${escapeHtml(t(messages, 'report.empty.hint'))}</p></div></div>`;
   }
-  return `<div class="top3">${top.map((f, i) => `
+  return `<div class="top3">${top.map((f, i) => {
+    const pages = (f.location?.pages || []).map(p => pageDisplayName(p, pageLabels));
+    return `
     <div class="top-card" data-jump="${escapeHtml(f.id)}">
       <span class="rank">#${i + 1} · ${escapeHtml(f.severity)}</span>
       <h3>${escapeHtml(f.title)}</h3>
-      <p class="note">${escapeHtml([...(f.location?.designators || []), ...(f.location?.nets || [])].join(' / '))}</p>
-    </div>`).join('')}</div>`;
+      <p class="note">${escapeHtml([...pages, ...(f.location?.designators || []), ...(f.location?.nets || [])].join(' / '))}</p>
+    </div>`;
+  }).join('')}</div>`;
 }
 
 function renderCoverage(data, messages) {
@@ -177,9 +278,13 @@ export function renderReport(options = {}) {
   const js = fs.readFileSync(path.join(ASSETS, 'report.js'), 'utf8');
   const date = new Date(data.generatedAt || Date.now()).toLocaleString(lang === 'en' ? 'en-US' : 'zh-CN');
   const categories = [...new Set(data.findings.map(f => f.category).filter(Boolean))].sort();
-  const pages = [...new Set(data.findings.flatMap(f => f.location?.pages || []))].sort();
+  const pageLabels = buildPageLabels(model);
+  const pageOptions = [...new Set(data.findings.flatMap(f => f.location?.pages || []))]
+    .map(raw => ({ raw, label: pageDisplayName(raw, pageLabels) }))
+    .sort((a, b) => a.label.localeCompare(b.label));
+  const review = readReviewMeta(outDir);
   const findingsHtml = data.findings.length
-    ? data.findings.map((f, i) => renderFinding(f, { messages, selfContained, outDir, idx: i })).join('\n')
+    ? data.findings.map((f, i) => renderFinding(f, { messages, selfContained, outDir, idx: i, pageLabels })).join('\n')
     : `<div class="placeholder">${escapeHtml(t(messages, 'report.empty'))}<br><span class="note">${escapeHtml(t(messages, 'report.empty.hint'))}</span></div>`;
   const embedded = {
     runId: data.runId,
@@ -206,6 +311,7 @@ export function renderReport(options = {}) {
         schematic: model.source?.schematic || '—',
         date,
       }))}</p>
+      ${renderReviewMeta(review, messages)}
       <p class="disclaimer">${escapeHtml(t(messages, 'report.disclaimer'))}</p>
     </div>
     <div class="severity-summary">
@@ -217,7 +323,7 @@ export function renderReport(options = {}) {
     </div>
   </header>
 
-  <div class="section"><h2>${escapeHtml(t(messages, 'report.top3'))}</h2>${renderTop3(data.findings, model, messages)}</div>
+  <div class="section"><h2>${escapeHtml(t(messages, 'report.top3'))}</h2>${renderTop3(data.findings, model, messages, pageLabels)}</div>
   <div class="section"><h2>${escapeHtml(t(messages, 'report.coverage'))}</h2>${renderCoverage(data, messages)}</div>
   ${renderRiskTable(data.findings, messages)}
 
@@ -228,7 +334,7 @@ export function renderReport(options = {}) {
     <button class="chip severity-chip" data-severity="P2" aria-pressed="false">P2</button>
     <button class="chip severity-chip" data-severity="P3" aria-pressed="false">P3</button>
     <select id="filter-category" class="select"><option value="all">${escapeHtml(t(messages, 'report.filters.category'))}</option>${categories.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('')}</select>
-    <select id="filter-page" class="select"><option value="all">${escapeHtml(t(messages, 'report.filters.page'))}</option>${pages.map(p => `<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`).join('')}</select>
+    <select id="filter-page" class="select"><option value="all">${escapeHtml(t(messages, 'report.filters.page'))}</option>${pageOptions.map(p => `<option value="${escapeHtml(p.raw)}">${escapeHtml(p.label)}</option>`).join('')}</select>
     <input id="search" type="search" placeholder="${escapeHtml(t(messages, 'report.search.placeholder'))}">
     <button id="export-minutes" class="btn">${escapeHtml(t(messages, 'report.review.export'))}</button>
     <span class="note"><strong id="visible-count">${data.findings.length}</strong> / ${data.findings.length}</span>
@@ -243,7 +349,7 @@ export function renderReport(options = {}) {
     version: data.skillVersion || skillVersion(),
     runId: data.runId || '',
     ruleVersion: '1.0',
-    model: data.model || 'unknown',
+    model: review.model,
   }))}</footer>
 </div>
 <div id="lightbox" class="lightbox" hidden><button class="lightbox-close" aria-label="close">×</button><img id="lightbox-img" alt=""></div>
@@ -279,6 +385,7 @@ export function renderReport(options = {}) {
     findings: data.findings,
     openQuestions: data.openQuestions || [],
     coverage: data.coverage,
+    review,
     screenshots: data.screenshots || { generated: 0, failed: 0, skipped: 0 },
     artifacts,
   };

@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed / 修复
+
+- Live collection works with run-api-gateway 4.1.105, which executes code as an
+  `async function(eda){}` body: every execute payload now returns explicitly, and
+  the synchronous `getEditorCurrentVersion()` is guarded with `try/catch`.
+  适配 run-api-gateway 4.1.105 的 `async function(eda){}` 执行模型：所有执行代码
+  显式 `return`，同步的 `getEditorCurrentVersion()` 改用 `try/catch`。
+- File-level `open_questions` in `ai/findings.ai.*.json` are now merged into the
+  report instead of being dropped.
+  合并 AI 结果文件顶层的 `open_questions`，不再丢失文件级待确认问题。
+- Findings show the schematic name and page name (`Schematic1 / P1`), resolved via
+  `getAllSchematicPagesInfo()` / `getAllSchematicsInfo()`.
+  问题条目展示原理图名与图页名（如 `Schematic1 / P1`）。
+- The report header shows the review model, total duration, and token usage
+  (exact when recorded in `review-context.json`, otherwise marked as estimated).
+  报告头部展示审查模型、总用时与 Token 消耗（有精确值时直接展示，否则标注估算）。
+
+### Changed / 变更
+
+- The agent asks the user for the report output directory (`--out`) before
+  running a review.
+  审查开始前先询问用户报告输出目录（`--out`）。
+- Report layout uses the full window width instead of a fixed 1200 px column.
+  报告页面改为自适应全宽，取消固定 1200px 宽度。
+
 ### Planned / 计划中
 
 - Protel2 `.net` input support (v1 currently supports EasyEDA `.enet` only).

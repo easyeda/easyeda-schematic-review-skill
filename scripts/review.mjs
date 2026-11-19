@@ -51,6 +51,9 @@ function usage() {
   --resume              standard/strict 的 AI 完成后继续
   --self-contained      报告单文件（截图 base64）
   --start-bridge        明确同意后由本 skill 启动 Bridge
+  --model <name>        审查所用模型（也可用 SCHEMATIC_REVIEW_MODEL）
+  --tokens-in N         本次审查输入 Token（写入 review-context.json）
+  --tokens-out N        本次审查输出 Token（写入 review-context.json）
 `;
 }
 
@@ -62,6 +65,34 @@ function logLine(outDir, level, msg, extra) {
 }
 
 function manifestPath(outDir) { return path.join(outDir, 'manifest.json'); }
+
+function reviewContextPath(outDir) { return path.join(outDir, 'review-context.json'); }
+
+/** Record review metadata (model, start/end time, token usage) for the report. */
+function ensureReviewContext(outDir, opts, { endedAt = null } = {}) {
+  const file = reviewContextPath(outDir);
+  const current = fs.existsSync(file) ? readJson(file, {}) : {};
+  const manifest = fs.existsSync(manifestPath(outDir)) ? readJson(manifestPath(outDir), {}) : {};
+  const next = {
+    schemaVersion: '1.0',
+    ...current,
+    skillVersion: current.skillVersion || VERSION,
+    promptVersion: current.promptVersion || '1.0',
+  };
+  if (!next.startedAt) next.startedAt = manifest.runAt || new Date().toISOString();
+  const model = opts.model || process.env.SCHEMATIC_REVIEW_MODEL || current.model || manifest.model;
+  if (model && model !== 'unknown') next.model = model;
+  const tokensIn = opts.tokensIn ?? numArg(process.env.SCHEMATIC_REVIEW_TOKENS_IN, null);
+  const tokensOut = opts.tokensOut ?? numArg(process.env.SCHEMATIC_REVIEW_TOKENS_OUT, null);
+  if (tokensIn != null || tokensOut != null) {
+    const input = tokensIn ?? next.tokens?.input ?? 0;
+    const output = tokensOut ?? next.tokens?.output ?? 0;
+    next.tokens = { input, output, total: input + output };
+  }
+  if (endedAt && !next.endedAt) next.endedAt = endedAt;
+  writeJson(file, next);
+  return next;
+}
 
 function updateManifest(outDir, patch) {
   const file = manifestPath(outDir);
@@ -90,7 +121,7 @@ function initManifest(outDir, opts, source) {
     netlistType: 'JLCEDA',
     netlistVersion: source.netlistVersion || null,
     edaVersion: source.edaVersion || null,
-    model: process.env.SCHEMATIC_REVIEW_MODEL || 'unknown',
+    model: opts.model || process.env.SCHEMATIC_REVIEW_MODEL || 'unknown',
     promptVersion: '1.0',
     ruleCatalogVersion: '1.0',
     files: [],
@@ -108,7 +139,7 @@ function sourceFromCollect(collect) {
   return {
     project: project.name || project.projectName || project.title || doc.projectName || null,
     board: project.boardName || project.board || doc.boardName || null,
-    schematic: project.schematicName || project.schematic || doc.schematicName || doc.name || null,
+    schematic: project.schematicName || project.schematic || doc.schematicName || collect?.schematicName || doc.name || null,
     edaVersion: collect?.version || null,
   };
 }
@@ -221,6 +252,7 @@ function doLint(opts, outDir, log) {
 }
 
 function doPackets(opts, outDir, log) {
+  ensureDir(path.join(outDir, 'ai'));
   const model = readJson(path.join(outDir, 'model.json'));
   const lint = readJson(path.join(outDir, 'lint.json'), { findings: [], openQuestions: [] });
   const packets = buildPackets(model, lint, { maxPackets: opts.maxPackets, packetTokenLimit: opts.packetTokenLimit, focus: opts.focus });
@@ -267,6 +299,7 @@ function doCapture(opts, outDir, log) {
 }
 
 function doReport(opts, outDir, log) {
+  const context = ensureReviewContext(outDir, opts, { endedAt: new Date().toISOString() });
   const result = renderReport({ outDir, lang: opts.lang, selfContained: opts.selfContained });
   if (opts.jsonOut) {
     ensureDir(path.dirname(path.resolve(opts.jsonOut)));
@@ -274,6 +307,7 @@ function doReport(opts, outDir, log) {
   }
   updateManifest(outDir, {
     status: 'done',
+    model: context.model || undefined,
     files: collectManifestFiles(outDir),
     coverage: readJson(path.join(outDir, 'findings.final.json')).coverage,
   });
@@ -350,6 +384,9 @@ function normalizeOpts(argv) {
     maxScreenshots: numArg(raw['max-screenshots'], 30),
     maxPackets: numArg(raw['max-packets'], 20),
     resume: Boolean(raw.resume),
+    model: raw.model || process.env.SCHEMATIC_REVIEW_MODEL || null,
+    tokensIn: numArg(raw['tokens-in'], null),
+    tokensOut: numArg(raw['tokens-out'], null),
     runId: null,
   };
 }
@@ -370,6 +407,7 @@ function prepareOutDir(opts) {
 
 async function commandRun(opts, log) {
   const outDir = prepareOutDir(opts);
+  ensureReviewContext(outDir, opts);
   if (opts.resume) {
     if (!fs.existsSync(path.join(outDir, 'manifest.json'))) throw new CliError(`--resume 需要已有运行目录: ${outDir}`, 1);
     const manifest = readJson(path.join(outDir, 'manifest.json'));
@@ -422,6 +460,7 @@ async function main() {
     const progress = fs.existsSync(progressFile) ? readJson(progressFile, {}) : {};
     progress[packet] = { status, at: new Date().toISOString() };
     writeJson(progressFile, progress);
+    ensureReviewContext(outDir, opts);
     logLine(outDir, 'info', 'ai-done', { packet, status });
     console.log(`progress: ${packet} -> ${status}`);
     return 0;
@@ -430,6 +469,7 @@ async function main() {
   if (command === 'run') return await commandRun(opts, log);
 
   const outDir = prepareOutDir(opts);
+  ensureReviewContext(outDir, opts);
   if (command === 'collect') { await doCollect(opts, outDir, log); console.log(`collected: ${outDir}`); return 0; }
   if (command === 'lint') { doLint(opts, outDir, log); console.log(`lint: ${path.join(outDir, 'lint.json')}`); return 0; }
   if (command === 'packets') { doPackets(opts, outDir, log); console.log(`packets: ${path.join(outDir, 'packets')}`); return 0; }

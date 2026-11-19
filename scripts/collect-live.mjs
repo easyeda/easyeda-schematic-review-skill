@@ -69,17 +69,64 @@ function viewBoxOf(svg) {
   return m ? m[1] : null;
 }
 
+function pageItemName(page) {
+  return page?.name || page?.title || page?.pageName || page?.documentName || null;
+}
+
 function pageNameOf(doc) {
-  return doc?.name || doc?.title || doc?.pageName || doc?.documentName || 'Page';
+  return pageItemName(doc) || 'Page';
+}
+
+/**
+ * Build a uuid -> { name, parentSchematicUuid } catalog and
+ * schematic uuid -> name map from every source the gateway returns.
+ * getCurrentDocumentInfo() carries no display name, so page names must
+ * be resolved through getAllSchematicPagesInfo()/getAllSchematicsInfo()
+ * (or the project tree returned by getCurrentProjectInfo()).
+ */
+function pageCatalog(parts = {}) {
+  const pages = new Map();
+  const schematics = new Map();
+  const addPage = (page, parentUuid) => {
+    const uuid = page?.uuid || page?.pageUuid || page?.id;
+    if (!uuid) return;
+    const name = pageItemName(page);
+    if (!pages.has(uuid)) {
+      pages.set(uuid, { uuid, name, parentSchematicUuid: page.parentSchematicUuid || parentUuid || null });
+    } else if (!pages.get(uuid).name && name) {
+      pages.get(uuid).name = name;
+    }
+  };
+  const addSchematic = (schematic) => {
+    const uuid = schematic?.uuid || schematic?.schematicUuid || schematic?.id;
+    if (uuid && schematic.name) schematics.set(uuid, schematic.name);
+    for (const page of schematic?.page || schematic?.pages || []) addPage(page, uuid);
+  };
+  for (const schematic of parts.schematicsInfo || []) addSchematic(schematic);
+  for (const page of parts.pagesInfo || []) addPage(page);
+  for (const page of parts.pages || []) addPage(page);
+  for (const item of parts.project?.data || []) {
+    if (Array.isArray(item?.page)) addSchematic(item);
+  }
+  return { pages: [...pages.values()], schematics };
+}
+
+function pageLabelOf(page) {
+  const pageName = page?.pageName || page?.name || null;
+  const schematicName = page?.schematicName || null;
+  if (schematicName && pageName) return `${schematicName} / ${pageName}`;
+  return pageName || schematicName || null;
 }
 
 async function collectCurrentPage(bridgeUrl, windowId, includeGeometry) {
   const code = `${COMPONENT_SNAPSHOT}
-(async () => {
+return await (async () => {
   const result = { ok: true };
   result.doc = await eda.dmt_SelectControl.getCurrentDocumentInfo().catch(e => ({ error: String(e) }));
   result.project = await eda.dmt_Project.getCurrentProjectInfo().catch(e => ({ error: String(e) }));
-  result.version = await eda.sys_Environment.getEditorCurrentVersion().catch(() => null);
+  try { result.version = await eda.sys_Environment.getEditorCurrentVersion(); } catch { result.version = null; }
+  try { result.pagesInfo = await eda.dmt_Schematic.getAllSchematicPagesInfo(); } catch (e) { result.pagesInfoError = String(e); }
+  try { result.schematicsInfo = await eda.dmt_Schematic.getAllSchematicsInfo(); } catch (e) { result.schematicsInfoError = String(e); }
   try {
     const f = await eda.sch_ManufactureData.getNetlistFile('design', 'JLCEDA');
     result.netlist = f ? await f.text() : null;
@@ -101,11 +148,12 @@ async function collectCurrentPage(bridgeUrl, windowId, includeGeometry) {
 
 async function collectPage(bridgeUrl, windowId, page, includeGeometry) {
   const uuid = page.uuid || page.pageUuid || page.id;
+  const uuidLiteral = uuid ? JSON.stringify(String(uuid)) : 'null';
   const code = `${COMPONENT_SNAPSHOT}
-(async () => {
+return await (async () => {
   const result = { ok: true };
-  if (${JSON.stringify(String(uuid))}) {
-    try { await eda.dmt_EditorControl.openDocument(${JSON.stringify(String(uuid))}); } catch (e) { result.openError = String(e); }
+  if (${uuidLiteral}) {
+    try { await eda.dmt_EditorControl.openDocument(${uuidLiteral}); } catch (e) { result.openError = String(e); }
   }
   result.components = await __components(${includeGeometry ? 'true' : 'false'}).catch(e => []);
   result.svg = await __pageSvg();
@@ -140,13 +188,24 @@ export async function collectLive(options = {}) {
   if (base.drc) writeJson(path.join(outDir, 'drc.json'), base.drc);
 
   const doc = base.doc || {};
-  const pageName = pageNameOf(doc);
+  const docUuid = doc.uuid || doc.pageUuid || doc.id || null;
+  const catalog = pageCatalog({
+    pagesInfo: base.pagesInfo,
+    schematicsInfo: base.schematicsInfo,
+    project: base.project,
+  });
+  const currentPageItem = catalog.pages.find(p => p.uuid === docUuid) || null;
+  const pageName = currentPageItem?.name || pageNameOf(doc);
+  const schematicUuid = currentPageItem?.parentSchematicUuid || null;
+  const schematicName = schematicUuid ? (catalog.schematics.get(schematicUuid) || null) : null;
   const pageFileKey = sanitizeFileKey(pageName);
   const pages = {};
   const current = {
-    pageUuid: doc.uuid || doc.pageUuid || doc.id || null,
+    pageUuid: docUuid,
     pageName,
     pageFileKey,
+    schematicUuid,
+    schematicName,
     pageWidth: null,
     pageHeight: null,
     svgViewBox: viewBoxOf(base.svg),
@@ -173,21 +232,34 @@ export async function collectLive(options = {}) {
 
   if (options.mapPages) {
     try {
-      const pageList = await execute(bridge.url, `
-        (async () => {
-          const pages = await eda.dmt_Schematic.getAllSchematicPagesInfo();
-          const cur = await eda.dmt_SelectControl.getCurrentDocumentInfo().catch(() => null);
-          return { pages: pages || [], current: cur };
-        })()`, { windowId, timeoutMs: 30000 });
+      let pageItems = catalog.pages;
+      if (!pageItems.length) {
+        const pageList = await execute(bridge.url, `
+          return await (async () => {
+            const pages = await eda.dmt_Schematic.getAllSchematicPagesInfo();
+            const schematics = await eda.dmt_Schematic.getAllSchematicsInfo().catch(() => []);
+            const cur = await eda.dmt_SelectControl.getCurrentDocumentInfo().catch(() => null);
+            return { pages: pages || [], schematics: schematics || [], current: cur };
+          })()`, { windowId, timeoutMs: 30000 });
+        const fallback = pageCatalog({ pagesInfo: pageList.pages, schematicsInfo: pageList.schematics });
+        for (const [uuid, name] of fallback.schematics) {
+          if (!catalog.schematics.has(uuid)) catalog.schematics.set(uuid, name);
+        }
+        pageItems = fallback.pages;
+      }
       const originalUuid = current.pageUuid;
-      for (const p of pageList.pages || []) {
-        const pName = pageNameOf(p);
+      for (const p of pageItems) {
+        const pName = pageItemName(p) || 'Page';
+        const pSchematicUuid = p.parentSchematicUuid || null;
+        const pSchematicName = pSchematicUuid ? (catalog.schematics.get(pSchematicUuid) || null) : null;
         const pKey = sanitizeFileKey(pName);
         const snap = await collectPage(bridge.url, windowId, p, options.geometry !== false);
         const pg = {
           pageUuid: p.uuid || p.pageUuid || p.id || null,
           pageName: pName,
           pageFileKey: pKey,
+          schematicUuid: pSchematicUuid,
+          schematicName: pSchematicName,
           pageWidth: null,
           pageHeight: null,
           svgViewBox: viewBoxOf(snap.svg),
@@ -210,7 +282,7 @@ export async function collectLive(options = {}) {
       }
       if (originalUuid) {
         await execute(bridge.url, `
-          (async () => { await eda.dmt_EditorControl.openDocument(${JSON.stringify(String(originalUuid))}); return { ok: true }; })()`,
+          return await (async () => { await eda.dmt_EditorControl.openDocument(${JSON.stringify(String(originalUuid))}); return { ok: true }; })()`,
           { windowId, timeoutMs: 30000 }).catch(() => null);
       }
     } catch (err) {
@@ -224,7 +296,7 @@ export async function collectLive(options = {}) {
     for (let i = 0; i < ids.length; i += 8) {
       const chunk = ids.slice(i, i + 8);
       const results = await Promise.all(chunk.map(id => execute(bridge.url, `
-          (async () => { try { return await eda.sch_Primitive.getPrimitivesBBox([${JSON.stringify(id)}]); } catch { return null; } })()`,
+          return await (async () => { try { return await eda.sch_Primitive.getPrimitivesBBox([${JSON.stringify(id)}]); } catch { return null; } })()`,
         { windowId, timeoutMs: 15000 }).catch(() => null)));
       chunk.forEach((id, k) => {
         const bb = results[k];
@@ -237,6 +309,7 @@ export async function collectLive(options = {}) {
 
   const geometry = {
     currentPage: pageName,
+    currentSchematic: schematicName,
     pages,
   };
   writeJson(path.join(outDir, 'geometry.json'), geometry);
@@ -254,6 +327,9 @@ export async function collectLive(options = {}) {
     mapPages: Boolean(options.mapPages),
     pageName,
     pageFileKey,
+    schematicUuid,
+    schematicName,
+    pageLabel: pageLabelOf({ pageName, schematicName }),
     windowId,
     bridgePort: bridge.port,
   };

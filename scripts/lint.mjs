@@ -762,6 +762,44 @@ export function lintModel(model, options = {}) {
     deduped.push(f);
   }
   const finalFindings = deduped;
+
+  // Attach page names from model.geometry so the report can show which page a finding is on.
+  const compByUid = new Map(model.components.map(c => [c.uid, c]));
+  const compsByDesignator = new Map();
+  for (const c of model.components) {
+    if (!c.designator) continue;
+    if (!compsByDesignator.has(c.designator)) compsByDesignator.set(c.designator, []);
+    compsByDesignator.get(c.designator).push(c);
+  }
+  const drcPageByPrimitiveId = new Map();
+  for (const page of Object.values(model.geometry?.pages || {})) {
+    for (const primitiveId of Object.keys(page.drcPrimitives || {})) {
+      if (!drcPageByPrimitiveId.has(primitiveId)) drcPageByPrimitiveId.set(primitiveId, page.pageName || null);
+    }
+  }
+  for (const f of finalFindings) {
+    if ((f.location.pages || []).length) continue;
+    const pageNames = new Set();
+    for (const uid of f.location.uids) {
+      const comp = compByUid.get(uid);
+      if (comp?.page) pageNames.add(comp.page);
+    }
+    if (!pageNames.size) {
+      for (const designator of f.location.designators) {
+        for (const comp of compsByDesignator.get(designator) || []) {
+          if (comp.page) pageNames.add(comp.page);
+        }
+      }
+    }
+    if (!pageNames.size) {
+      for (const e of f.evidence || []) {
+        if (e.kind !== 'drc' || !e.primitiveId) continue;
+        const pageName = drcPageByPrimitiveId.get(e.primitiveId);
+        if (pageName) pageNames.add(pageName);
+      }
+    }
+    f.location.pages = [...pageNames];
+  }
   finalFindings.sort((a, b) => {
     const order = { P0: 0, P1: 1, P2: 2, P3: 3 };
     const d = (order[a.severity] ?? 9) - (order[b.severity] ?? 9);

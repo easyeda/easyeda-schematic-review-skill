@@ -26,7 +26,7 @@ body {
   font-size: 15px; line-height: 1.65;
 }
 a { color: var(--accent); }
-.wrap { max-width: 1200px; margin: 0 auto; padding: 28px 22px 72px; }
+.wrap { width: 100%; max-width: none; margin: 0 auto; padding: 28px clamp(14px, 2.5vw, 48px) 72px; }
 .report-header {
   display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between;
   gap: 24px; padding: 26px 28px; background: linear-gradient(135deg, #0f172a, #134e4a 70%, #115e59);
@@ -34,6 +34,9 @@ a { color: var(--accent); }
 }
 .report-header h1 { margin: 0 0 6px; font-size: clamp(22px, 3vw, 30px); letter-spacing: .3px; }
 .subtitle { margin: 0; color: #cbd5e1; font-size: 13px; }
+.review-meta { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 12px; color: #cbd5e1; font-size: 12px; }
+.review-meta .meta-label { color: #94a3b8; margin-right: 6px; }
+.review-meta .meta-label::after { content: ":"; }
 .disclaimer { margin: 10px 0 0; color: #fbbf24; font-size: 12px; }
 .severity-summary { display: flex; gap: 8px; flex-wrap: wrap; }
 .severity-card {

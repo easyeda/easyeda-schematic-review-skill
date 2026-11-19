@@ -72,11 +72,14 @@ function normalizeGeometry(raw) {
   const pageKey = raw.pageKey || raw.pageName || '__current__';
   return {
     currentPage: raw.currentPage || raw.pageName || null,
+    currentSchematic: raw.currentSchematic || raw.schematicName || null,
     pages: {
       [pageKey]: {
         pageUuid: raw.pageUuid || null,
         pageName: raw.pageName || null,
         pageFileKey: raw.pageFileKey || sanitizeFileKey(raw.pageName || pageKey),
+        schematicUuid: raw.schematicUuid || null,
+        schematicName: raw.schematicName || null,
         pageWidth: raw.pageWidth ?? null,
         pageHeight: raw.pageHeight ?? null,
         svgViewBox: raw.svgViewBox || null,

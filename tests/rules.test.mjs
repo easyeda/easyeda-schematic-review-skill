@@ -8,6 +8,7 @@ import { buildModel } from '../scripts/parse-netlist.mjs';
 import { lintModel } from '../scripts/lint.mjs';
 import { classifyNet, classifyPinName, classifyComponent, dnpInfo } from '../scripts/lib/classify-components.mjs';
 import { mergeFindings } from '../scripts/merge-findings.mjs';
+import { renderReport } from '../scripts/render-html.mjs';
 import { readJson, writeJson, ensureDir } from '../scripts/lib/util.mjs';
 
 const FIX = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'projects', 'ne555.enet');
@@ -180,13 +181,14 @@ test('merge deduplicates AI findings and computes stable findingKey', () => {
       evidence: [{ kind: 'component', uid: 'gge1', designator: 'U1' }],
       location: { pages: [], designators: ['U1'], uids: ['gge1'], nets: [] },
     }],
-    open_questions: [],
+    open_questions: ['需要确认 U1 的 RESET 上拉阻值'],
   });
   const result = mergeFindings({ outDir: dir, aiDir: path.join(dir, 'ai'), lang: 'zh', mode: 'standard' });
+  assert.ok(result.openQuestions.some(q => q.question === '需要确认 U1 的 RESET 上拉阻值'));
   assert.equal(result.findings.filter(f => f.ruleId === 'R016' && f.location.uids.includes('gge1')).length, 1);
   const f = result.findings[0];
   assert.match(f.findingKey, /^R/);
-  assert.equal(result.openQuestions.length, 0);
+  assert.equal(result.openQuestions.length, 1);
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -206,5 +208,90 @@ test('merge rejects AI findings with invalid evidence', () => {
   const result = mergeFindings({ outDir: dir, aiDir: path.join(dir, 'ai'), lang: 'zh', mode: 'standard' });
   assert.equal(result.coverage.aiRejected.length, 1);
   assert.equal(result.findings.length, 0);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('lint attaches page names from geometry', () => {
+  const model = buildModel(netlist({
+    a: comp('gge1', 'R1', { 'Add into BOM': 'yes', 'Convert to PCB': 'yes' }, [['1', '', 'N1'], ['2', '', 'N2']]),
+  }), {
+    geometry: {
+      currentPage: 'P1',
+      pages: {
+        P1: {
+          pageName: 'P1', pageFileKey: 'P1', schematicName: 'Schematic1',
+          components: { gge1: { designator: 'R1' } }, designatorIndex: {}, drcPrimitives: {},
+        },
+      },
+    },
+  });
+  const lint = lintModel(model, { mode: 'quick' });
+  const f = lint.findings.find(x => x.ruleId === 'R016');
+  assert.deepEqual(f.location.pages, ['P1']);
+});
+
+test('merge derives page names for AI findings', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sch-review-test-'));
+  const model = buildModel(loadNe555(), { source: { mode: 'file' } });
+  model.components.find(c => c.uid === 'gge1').page = 'P1';
+  writeJson(path.join(dir, 'model.json'), model);
+  writeJson(path.join(dir, 'lint.json'), { findings: [], openQuestions: [], coverage: {} });
+  ensureDir(path.join(dir, 'ai'));
+  writeJson(path.join(dir, 'ai', 'findings.ai.component-U1.json'), {
+    findings: [{
+      id: 'AI-1', severity: 'P2', confidence: 'medium', category: 'component', title: 't',
+      evidence: [{ kind: 'component', uid: 'gge1', designator: 'U1' }],
+      location: { pages: [], designators: ['U1'], uids: ['gge1'], nets: [] },
+    }],
+    open_questions: [],
+  });
+  const result = mergeFindings({ outDir: dir, aiDir: path.join(dir, 'ai'), lang: 'zh', mode: 'standard' });
+  assert.deepEqual(result.findings[0].location.pages, ['P1']);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('report shows model, duration, tokens, and page/schematic names', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sch-review-test-'));
+  const model = buildModel(loadNe555(), {
+    source: { mode: 'file', project: 'Prj', board: 'B1', schematic: 'Schematic1' },
+    geometry: {
+      currentPage: 'P1',
+      currentSchematic: 'Schematic1',
+      pages: {
+        P1: {
+          pageName: 'P1', pageFileKey: 'P1', schematicName: 'Schematic1',
+          components: { gge1: { designator: 'U1' } }, designatorIndex: {}, drcPrimitives: {},
+        },
+      },
+    },
+  });
+  writeJson(path.join(dir, 'model.json'), model);
+  const startedAt = new Date(Date.now() - 90000).toISOString();
+  writeJson(path.join(dir, 'review-context.json'), {
+    schemaVersion: '1.0', model: 'claude-test-1', startedAt,
+    endedAt: new Date().toISOString(), tokens: { input: 1200, output: 300, total: 1500 },
+  });
+  writeJson(path.join(dir, 'manifest.json'), { runAt: startedAt, model: 'claude-test-1', packets: [] });
+  writeJson(path.join(dir, 'findings.final.json'), {
+    schemaVersion: '1.0', runId: 'test', skillVersion: '1.0.0', lang: 'zh', mode: 'quick',
+    source: model.source, stats: model.stats,
+    findings: [{
+      id: 'F-001', source: 'rule', ruleId: 'R016', messageKey: 'R016.title', params: { designator: 'U1' },
+      severity: 'P2', confidence: 'medium', category: 'component', title: 't',
+      observation: '', impact: '', suggestion: '',
+      evidence: [{ kind: 'component', uid: 'gge1', designator: 'U1' }],
+      location: { pages: ['P1'], designators: ['U1'], uids: ['gge1'], nets: [] },
+    }],
+    openQuestions: [], coverage: {}, warnings: [],
+  });
+  const { htmlFile } = renderReport({ outDir: dir, lang: 'zh' });
+  const html = fs.readFileSync(htmlFile, 'utf8');
+  assert.match(html, /Schematic1 \/ P1/);
+  assert.match(html, /claude-test-1/);
+  assert.match(html, /Token 消耗/);
+  assert.match(html, /1,500/);
+  const report = readJson(path.join(dir, 'report.json'));
+  assert.equal(report.review.tokens.total, 1500);
+  assert.ok(report.review.durationMs >= 85000);
   fs.rmSync(dir, { recursive: true, force: true });
 });
