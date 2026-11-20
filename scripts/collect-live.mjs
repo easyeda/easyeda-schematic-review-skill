@@ -191,10 +191,11 @@ async function openTransport(options, log) {
     return { transport: 'custom', ...(options.transportInfo || {}), execute: options.executeCode, close: options.closeTransport || null };
   }
   if (options.cli?.projectPath) {
-    const cli = openCliTransport({
+    const cli = await openCliTransport({
       projectPath: options.cli.projectPath,
       executable: options.cli.executable || null,
       headless: options.cli.headless !== false,
+      pageId: options.cli.pageId || null,
       logger: log,
     });
     return {
@@ -203,6 +204,7 @@ async function openTransport(options, log) {
       cliVersion: cli.cliVersion,
       sessionId: cli.sessionId,
       projectPath: cli.projectPath,
+      pageInfo: cli.pageInfo,
       execute: cli.execute,
       close: cli.close,
     };
@@ -395,6 +397,10 @@ async function collectWithTransport(options, outDir, log, t) {
     cliVersion: t.cliVersion || null,
     sessionId: t.sessionId || null,
     projectPath: t.projectPath || null,
+    openedPage: t.pageInfo?.opened || null,
+    pageSelection: t.pageInfo?.selectedBy || null,
+    pageList: t.pageInfo?.pages || [],
+    schematicCount: t.pageInfo?.schematics?.length ?? null,
   };
   writeJson(path.join(outDir, 'collect.json'), summary);
   log.info('collect-live done', summary);

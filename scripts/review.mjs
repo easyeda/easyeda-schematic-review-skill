@@ -28,6 +28,7 @@ function usage() {
   review.mjs run --source live|cli|file [--mode quick|standard|strict] [--out DIR]
   review.mjs run --source cli --project <本地工程.eprj3> --out DIR
   review.mjs collect --source live|cli|file --netlist design.enet --out DIR
+  review.mjs collect --source cli --project <本地工程.eprj3> [--page <图页uuid|名称>] --out DIR
   review.mjs lint --out DIR
   review.mjs packets --out DIR
   review.mjs merge --out DIR [--ai-dir DIR]
@@ -40,6 +41,7 @@ function usage() {
   --project <file>      CLI 模式：本地工程 .eprj3 路径（请向用户确认；不解析文件格式，通过 CLI API 读取）
   --cli <exe>           CLI 可执行文件（默认自动探测 lceda-pro / easyeda-pro）
   --cli-show            CLI 模式显示编辑器窗口（默认 headless 打开）
+  --page <uuid|名称>    CLI 模式指定要审查的原理图图页（默认第一个图页）
   --bom <file>          BOM CSV
   --drc <file>          DRC JSON
   --scope <expr>        page:P1 / net:VCC / designator:U1 / category:power
@@ -194,6 +196,7 @@ async function doCollect(opts, outDir, log) {
           projectPath: opts.project,
           executable: opts.cliPath,
           headless: !opts.cliShow,
+          pageId: opts.page,
         } : null,
       });
     } catch (err) {
@@ -249,6 +252,7 @@ async function doCollect(opts, outDir, log) {
     cliPath: collectInfo?.cliPath || null,
     cliVersion: collectInfo?.cliVersion || null,
     sessionId: collectInfo?.sessionId || null,
+    openedPage: collectInfo?.openedPage || null,
     project: source.project,
     board: source.board,
     schematic: source.schematic,
@@ -383,6 +387,7 @@ function normalizeOpts(argv) {
     project: raw.project || null,
     cliPath: raw.cli || process.env.SCHEMATIC_REVIEW_CLI || null,
     cliShow: Boolean(raw['cli-show']),
+    page: raw.page || null,
     bom: raw.bom || null,
     drc: raw.drc || null,
     aiDir: raw['ai-dir'] || null,

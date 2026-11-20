@@ -1141,7 +1141,7 @@ test('choosePage rejects foreign same-uid parts and tolerates net neighbors', ()
   // netlist does not know that uid — only the netlist-confirmed page wins.
   const byDesignator = choosePage({ location: { pages: [], designators: ['U5'], uids: [], nets: [] } }, model);
   assert.equal(byDesignator.key, 'Schematic1__P1');
-});test('cli transport parses versions and rejects unsupported clients', () => {
+});test('cli transport parses versions and rejects unsupported clients', async () => {
   assert.deepEqual(parseCliVersion('JLCEDA Pro 4.1.103.abcdef01\nUsage: ...'), [4, 1, 103]);
   assert.deepEqual(parseCliVersion('EasyEDA Pro 4.2.0'), [4, 2, 0]);
   assert.equal(parseCliVersion('no version here'), null);
@@ -1168,16 +1168,17 @@ test('choosePage rejects foreign same-uid parts and tolerates net neighbors', ()
     opened = true;
     return { status: 0, stdout: JSON.stringify({ ok: true, value: {} }) };
   };
-  assert.throws(() => openCliTransport({ projectPath: 'x.eprj3', executable: exe, spawnFn: oldSpawn }), /版本过低/);
+  await assert.rejects(openCliTransport({ projectPath: 'x.eprj3', executable: exe, spawnFn: oldSpawn }), /版本过低/);
   assert.equal(opened, false);
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('cli transport opens a session, invokes with eda identity, and closes', () => {
+test('cli transport opens a session, opens the first page, invokes with eda identity, and closes', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sch-review-test-'));
   const exe = path.join(dir, 'fake-cli.exe');
   fs.writeFileSync(exe, '', 'utf8');
   const calls = [];
+  const openedPages = [];
   const spawnFn = (candidate, args) => {
     calls.push(args);
     if (args[0] === '--help') return { status: 0, stdout: 'JLCEDA Pro 4.1.103\n' };
@@ -1186,19 +1187,36 @@ test('cli transport opens a session, invokes with eda identity, and closes', () 
     }
     if (args[0] === 'invoke') {
       const code = args[args.indexOf('--code') + 1];
+      if (code.includes('getAllSchematicPagesInfo')) {
+        return { status: 0, stdout: JSON.stringify({ ok: true, value: {
+          pages: [{ uuid: 'pg1', name: 'P1', parentSchematicUuid: 's1' }],
+          schematics: [{ uuid: 's1', name: 'Schematic1' }],
+          current: null,
+        } }) };
+      }
+      if (code.includes('openDocument')) {
+        const m = code.match(/const target = "([^"]+)"/);
+        if (m) openedPages.push(m[1]);
+        return { status: 0, stdout: JSON.stringify({ ok: true, value: { ok: true, tabId: 'tab1', doc: { uuid: m ? m[1] : null }, activated: true } }) };
+      }
       return { status: 0, stdout: JSON.stringify({ ok: true, value: { ran: code } }) };
     }
     if (args[0] === 'session') return { status: 0, stdout: JSON.stringify({ ok: true, value: { closed: true } }) };
     return { status: 0, stdout: JSON.stringify({ ok: true, value: null }) };
   };
-  const t = openCliTransport({ projectPath: 'C:/proj/MyBoard.eprj3', executable: exe, spawnFn });
+  const t = await openCliTransport({ projectPath: 'C:/proj/MyBoard.eprj3', executable: exe, spawnFn });
   assert.equal(t.transport, 'cli');
   assert.equal(t.sessionId, 'sess-1');
+  // `open` leaves no document open in CLI sessions: the first page is opened.
+  assert.deepEqual(openedPages, ['pg1']);
+  assert.equal(t.pageInfo.opened.uuid, 'pg1');
+  assert.equal(t.pageInfo.opened.schematicName, 'Schematic1');
+  assert.equal(t.pageInfo.selectedBy, 'first');
   const openArgs = calls.find(a => a[0] === 'open');
   assert.ok(openArgs.includes('--path') && openArgs.includes('--headless'));
   const value = t.execute('return 1 + 1', { timeoutMs: 5000 });
   assert.equal(value.ran, 'return 1 + 1');
-  const invokeArgs = calls.find(a => a[0] === 'invoke');
+  const invokeArgs = calls.find(a => a[0] === 'invoke' && a.includes('return 1 + 1'));
   assert.deepEqual(invokeArgs.slice(0, 6), ['invoke', '--session', 'sess-1', '--ext-uuid', 'eda', '--code']);
   assert.equal(invokeArgs[invokeArgs.indexOf('--timeout') + 1], '5000');
   t.close();
@@ -1266,4 +1284,86 @@ test('collectLive runs the full collection over an injected executor (no Bridge)
   const collect = readJson(path.join(dir, 'collect.json'));
   assert.equal(collect.transport, 'test');
   fs.rmSync(dir, { recursive: true, force: true });
+});function cliPageFake({ pages, schematics = [], current = null } = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sch-review-test-'));
+  const exe = path.join(dir, 'fake-cli.exe');
+  fs.writeFileSync(exe, '', 'utf8');
+  const calls = [];
+  const openedPages = [];
+  const spawnFn = (candidate, args) => {
+    calls.push(args);
+    if (args[0] === '--help') return { status: 0, stdout: 'JLCEDA Pro 4.1.103\n' };
+    if (args[0] === 'open') return { status: 0, stdout: JSON.stringify({ ok: true, value: { sessionId: 's9', path: args[2], headless: true } }) };
+    if (args[0] === 'invoke') {
+      const code = args[args.indexOf('--code') + 1];
+      if (code.includes('getAllSchematicPagesInfo')) {
+        return { status: 0, stdout: JSON.stringify({ ok: true, value: { pages, schematics, current } }) };
+      }
+      if (code.includes('openDocument')) {
+        const m = code.match(/const target = "([^"]+)"/);
+        if (m) openedPages.push(m[1]);
+        return { status: 0, stdout: JSON.stringify({ ok: true, value: { ok: true, tabId: 'tab', doc: { uuid: m ? m[1] : null }, activated: true } }) };
+      }
+      return { status: 0, stdout: JSON.stringify({ ok: true, value: {} }) };
+    }
+    return { status: 0, stdout: JSON.stringify({ ok: true, value: { closed: true } }) };
+  };
+  return { exe, dir, spawnFn, calls, openedPages };
+}
+
+test('cli mode reuses an already-open document', async () => {
+  const fake = cliPageFake({
+    pages: [{ uuid: 'pg1', name: 'P1', parentSchematicUuid: 's1' }],
+    schematics: [{ uuid: 's1', name: 'Schematic1' }],
+    current: { uuid: 'pg1' },
+  });
+  const t = await openCliTransport({ projectPath: 'C:/proj/Board.eprj3', executable: fake.exe, spawnFn: fake.spawnFn });
+  assert.equal(t.pageInfo.selectedBy, 'already-open');
+  assert.deepEqual(fake.openedPages, []);
+  fs.rmSync(fake.dir, { recursive: true, force: true });
+});
+
+test('cli mode --page selects a page by uuid or unique name, rejects ambiguity', async () => {
+  const pages = [
+    { uuid: 'u1', name: 'P1', parentSchematicUuid: 's1' },
+    { uuid: 'u2', name: 'P1', parentSchematicUuid: 's2' },
+    { uuid: 'u3', name: 'P2', parentSchematicUuid: 's2' },
+  ];
+  const schematics = [{ uuid: 's1', name: 'Core' }, { uuid: 's2', name: 'Base' }];
+
+  const byName = cliPageFake({ pages, schematics });
+  const t = await openCliTransport({ projectPath: 'C:/proj/Board.eprj3', executable: byName.exe, pageId: 'P2', spawnFn: byName.spawnFn });
+  assert.deepEqual(byName.openedPages, ['u3']);
+  assert.equal(t.pageInfo.opened.schematicName, 'Base');
+  assert.equal(t.pageInfo.selectedBy, 'explicit');
+
+  const byUuid = cliPageFake({ pages, schematics });
+  await openCliTransport({ projectPath: 'C:/proj/Board.eprj3', executable: byUuid.exe, pageId: 'u1', spawnFn: byUuid.spawnFn });
+  assert.deepEqual(byUuid.openedPages, ['u1']);
+
+  const ambiguous = cliPageFake({ pages, schematics });
+  await assert.rejects(
+    openCliTransport({ projectPath: 'C:/proj/Board.eprj3', executable: ambiguous.exe, pageId: 'P1', spawnFn: ambiguous.spawnFn }),
+    /不唯一/,
+  );
+  assert.deepEqual(ambiguous.openedPages, []);
+
+  const missing = cliPageFake({ pages, schematics });
+  await assert.rejects(
+    openCliTransport({ projectPath: 'C:/proj/Board.eprj3', executable: missing.exe, pageId: 'nope', spawnFn: missing.spawnFn }),
+    /图页不存在/,
+  );
+  fs.rmSync(byName.dir, { recursive: true, force: true });
+  fs.rmSync(byUuid.dir, { recursive: true, force: true });
+  fs.rmSync(ambiguous.dir, { recursive: true, force: true });
+  fs.rmSync(missing.dir, { recursive: true, force: true });
+});
+
+test('cli mode fails clearly when the project has no schematic page', async () => {
+  const fake = cliPageFake({ pages: [], schematics: [] });
+  await assert.rejects(
+    openCliTransport({ projectPath: 'C:/proj/Empty.eprj3', executable: fake.exe, spawnFn: fake.spawnFn }),
+    /没有可打开的原理图图页/,
+  );
+  fs.rmSync(fake.dir, { recursive: true, force: true });
 });

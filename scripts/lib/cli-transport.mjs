@@ -157,12 +157,68 @@ export function cliCloseSession(executable, sessionId, { spawnFn = spawnSync } =
   }
 }
 
+const LIST_PAGES_CODE = `
+return await (async () => {
+  const pages = await eda.dmt_Schematic.getAllSchematicPagesInfo().catch(() => []);
+  const schematics = await eda.dmt_Schematic.getAllSchematicsInfo().catch(() => []);
+  const current = await eda.dmt_SelectControl.getCurrentDocumentInfo().catch(() => null);
+  return { pages: pages || [], schematics: schematics || [], current: current || null };
+})()`;
+
 /**
- * Detect the CLI, open the given project, and return an executor compatible
- * with bridge.execute(): `execute(code, {timeoutMs})`. Call `close()` when
- * done — it destroys the session/window we opened.
+ * Open a schematic page and wait until it is ready and active. Canvas APIs
+ * (netlist, DRC, primitive traversal) only work on an opened + activated
+ * document, and `open` leaves no document open in CLI sessions.
  */
-export function openCliTransport({ projectPath, executable = null, headless = true, spawnFn = spawnSync, logger = null } = {}) {
+function openPageCode(uuid) {
+  return `
+return await (async () => {
+  const target = ${JSON.stringify(uuid)};
+  const idOf = d => (d && (d.uuid || d.pageUuid || d.id)) || null;
+  const tabId = await eda.dmt_EditorControl.openDocument(target);
+  if (!tabId) return { ok: false, error: 'openDocument 未返回标签页 ID（打开失败）' };
+  let ready = true;
+  if (typeof eda.dmt_EditorControl.waitForDocumentReady === 'function') {
+    ready = await eda.dmt_EditorControl.waitForDocumentReady(target, 60000);
+  } else {
+    const deadline = Date.now() + 60000;
+    ready = false;
+    while (Date.now() < deadline) {
+      const st = typeof eda.dmt_EditorControl.getDocumentReadyState === 'function'
+        ? await eda.dmt_EditorControl.getDocumentReadyState(tabId).catch(() => null)
+        : null;
+      const cur = await eda.dmt_SelectControl.getCurrentDocumentInfo().catch(() => null);
+      if (st === 'ready' || idOf(cur) === target) { ready = true; break; }
+      await new Promise(r => setTimeout(r, 200));
+    }
+  }
+  if (!ready) return { ok: false, error: '文档未在 60s 内就绪' };
+  let cur = await eda.dmt_SelectControl.getCurrentDocumentInfo().catch(() => null);
+  if (idOf(cur) !== target && typeof eda.dmt_EditorControl.activateDocument === 'function') {
+    await eda.dmt_EditorControl.activateDocument(tabId).catch(() => null);
+    cur = await eda.dmt_SelectControl.getCurrentDocumentInfo().catch(() => null);
+  }
+  return { ok: true, tabId, doc: cur || null, activated: idOf(cur) === target };
+})()`;
+}
+
+function pageLabelOfItem(page, schematicsById) {
+  const schematicName = page.parentSchematicUuid ? (schematicsById.get(page.parentSchematicUuid) || null) : null;
+  return [page.name || page.uuid, schematicName].filter(Boolean).join(' @ ');
+}
+
+function pageOptions(pages, schematicsById) {
+  return pages.map(p => `${pageLabelOfItem(p, schematicsById)}（uuid: ${p.uuid}）`).join('；') || '（无）';
+}
+
+/**
+ * Detect the CLI, open the project, then open a schematic page — `open` leaves
+ * no document active, and canvas APIs require one. Page selection: `pageId`
+ * (uuid, or a unique page name) when given, else the already-open document if
+ * any, else the first page of the project. Returns an executor compatible with
+ * bridge.execute() plus `pageInfo`; call `close()` when done.
+ */
+export async function openCliTransport({ projectPath, executable = null, headless = true, pageId = null, spawnFn = spawnSync, logger = null } = {}) {
   if (!projectPath) throw new Error('CLI 模式需要工程路径（.eprj3）');
   const found = detectCli({ explicit: executable, spawnFn, logger });
   if (!found) {
@@ -177,13 +233,79 @@ export function openCliTransport({ projectPath, executable = null, headless = tr
   }
   logger?.info?.('cli open project', { executable: found.executable, version: found.versionText, projectPath });
   const session = cliOpenProject(found.executable, projectPath, { headless, spawnFn });
-  logger?.info?.('cli session opened', { sessionId: session.sessionId, headless });
+
+  // Project opened — now locate a schematic page and make it active.
+  const state = cliInvoke(found.executable, session.sessionId, LIST_PAGES_CODE, { timeoutMs: 60000, spawnFn }) || {};
+  const schematicsById = new Map((state.schematics || []).map(s => [s.uuid || s.schematicUuid || s.id, s.name || null]));
+  const pages = (state.pages || []).map(p => ({
+    uuid: p.uuid || p.pageUuid || p.id || null,
+    name: p.name || p.pageName || null,
+    parentSchematicUuid: p.parentSchematicUuid || null,
+    schematicName: p.parentSchematicUuid ? (schematicsById.get(p.parentSchematicUuid) || null) : null,
+  })).filter(p => p.uuid);
+  if (!pages.length) {
+    throw new Error(`工程中没有可打开的原理图图页：${projectPath}（无法读取网表/DRC）`);
+  }
+  const currentId = state.current && (state.current.uuid || state.current.pageUuid || state.current.id) || null;
+  let target = null;
+  let selectedBy = 'first';
+  if (pageId) {
+    target = pages.find(p => p.uuid === pageId) || null;
+    if (!target) {
+      const byName = pages.filter(p => p.name === pageId);
+      if (byName.length === 1) target = byName[0];
+      else if (byName.length > 1) {
+        throw new Error(`图页名 "${pageId}" 不唯一，请用 uuid 指定：${pageOptions(byName, schematicsById)}`);
+      } else {
+        throw new Error(`图页不存在: ${pageId}。可用：${pageOptions(pages, schematicsById)}`);
+      }
+    }
+    selectedBy = 'explicit';
+  } else if (currentId && pages.some(p => p.uuid === currentId)) {
+    target = pages.find(p => p.uuid === currentId);
+    selectedBy = 'already-open';
+  } else {
+    target = pages[0];
+  }
+
+  if (selectedBy !== 'already-open') {
+    logger?.info?.('cli open page', { uuid: target.uuid, name: target.name, schematicName: target.schematicName });
+    const opened = cliInvoke(found.executable, session.sessionId, openPageCode(target.uuid), { timeoutMs: 120000, spawnFn }) || {};
+    if (!opened.ok) {
+      throw new Error(`打开图页失败（${pageLabelOfItem(target, schematicsById)}）: ${opened.error || '未知错误'}`);
+    }
+    const docId = opened.doc && (opened.doc.uuid || opened.doc.pageUuid || opened.doc.id) || null;
+    if (docId && docId !== target.uuid) {
+      throw new Error(`打开图页失败：当前文档不是目标图页（${pageLabelOfItem(target, schematicsById)}），请重新运行或改用 --page 指定`);
+    }
+    if (!docId && opened.activated === false) {
+      logger?.warn?.('page opened but not reported as active', { uuid: target.uuid });
+    }
+    logger?.info?.('cli page ready', { uuid: target.uuid, tabId: opened.tabId || null });
+  } else {
+    logger?.info?.('cli page already open', { uuid: target.uuid });
+  }
+
+  if (!pageId && schematicsById.size > 1) {
+    logger?.warn?.('工程包含多个原理图，默认审查第一个图页', {
+      count: schematicsById.size,
+      opened: pageLabelOfItem(target, schematicsById),
+      available: pageOptions(pages, schematicsById),
+    });
+  }
+
   return {
     transport: 'cli',
     executable: found.executable,
     cliVersion: found.versionText,
     sessionId: session.sessionId,
     projectPath,
+    pageInfo: {
+      opened: { uuid: target.uuid, name: target.name, schematicName: target.schematicName },
+      selectedBy,
+      pages,
+      schematics: [...schematicsById].map(([uuid, name]) => ({ uuid, name })),
+    },
     execute: (code, { timeoutMs = 120000 } = {}) => cliInvoke(found.executable, session.sessionId, code, { timeoutMs, spawnFn }),
     close: () => cliCloseSession(found.executable, session.sessionId, { spawnFn }),
   };

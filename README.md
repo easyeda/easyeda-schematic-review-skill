@@ -197,7 +197,10 @@ node "$SKILL_DIR/scripts/review.mjs" run \
 > **CLI mode never parses the `.eprj3` file.** The skill calls the desktop
 > client's built-in CLI (`lceda-pro` / `easyeda-pro`, v4.1.70+): it opens the
 > project in an editor session and reads netlist, BOM, DRC, pin data, page SVGs
-> and geometry through the same read-only editor APIs as Bridge mode. The
+> and geometry through the same read-only editor APIs as Bridge mode. `open`
+> leaves no document active, and netlist/DRC APIs need one — the skill opens a
+> schematic page (the **first page by default**; `--page <uuid|名称>` selects
+> another; use the uuid when page names repeat across schematics). The
 > session it opened is closed when the run finishes (even on failure).
 > Opening a project may upgrade its file format to the current client version
 > (folder projects are two-way synced) — back it up first if that matters.
@@ -233,6 +236,7 @@ Add `--no-ai` to `standard`/`strict` to keep all rules but skip the AI step.
 | `--project <file>` | CLI mode: absolute path of the local `.eprj3` project (ask the user; never guessed) |
 | `--cli <exe>` | CLI mode: executable override; otherwise auto-detects `lceda-pro` / `easyeda-pro` |
 | `--cli-show` | CLI mode: show the editor window (default: headless) |
+| `--page <uuid\|名称>` | CLI mode: schematic page to review (default: first page); use the uuid when page names repeat across schematics |
 | `--netlist <file>` | Path to the `.enet` file (offline mode) |
 | `--bom <file>` | Optional BOM CSV for cross-checks |
 | `--drc <file>` | Optional DRC JSON exported from EasyEDA |
@@ -583,7 +587,9 @@ node "$SKILL_DIR/scripts/review.mjs" run \
 > **CLI 模式不解析 `.eprj3` 文件格式。** 本 Skill 调用桌面客户端内置 CLI
 > （`lceda-pro` / `easyeda-pro`，v4.1.70+）：在编辑器会话中打开工程，再通过与桥接
 > 模式完全相同的只读 editor API 读取网表、BOM、DRC、引脚数据、页面 SVG 与几何。
-> 运行结束（含失败）会自动关闭它创建的会话。打开工程可能把文件格式升级到当前
+> `open` 之后没有活动文档，而网表/DRC API 需要一个——本 Skill 会自动打开一个原理图
+> 图页（**默认第一个图页**；`--page <uuid|名称>` 指定其他图页，页名跨原理图重复时请用
+> uuid）。运行结束（含失败）会自动关闭它创建的会话。打开工程可能把文件格式升级到当前
 > 客户端版本（文件夹工程双向同步），介意时请先备份。
 
 指定报告目录：
@@ -616,6 +622,7 @@ node "$SKILL_DIR/scripts/review.mjs" run \
 | `--project <file>` | CLI 模式：本地 `.eprj3` 工程绝对路径（必须向用户确认，不得猜测） |
 | `--cli <exe>` | CLI 模式：指定可执行文件；默认自动探测 `lceda-pro` / `easyeda-pro` |
 | `--cli-show` | CLI 模式：显示编辑器窗口（默认 headless 打开） |
+| `--page <uuid\|名称>` | CLI 模式：指定要审查的原理图图页（默认第一个图页）；页名跨原理图重复时请用 uuid |
 | `--netlist <file>` | 离线模式下的 `.enet` 路径 |
 | `--bom <file>` | 可选的 BOM CSV，用于一致性检查 |
 | `--drc <file>` | 可选的 DRC JSON |

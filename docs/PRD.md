@@ -31,7 +31,7 @@
 | 0.11 | 规则补全：新增 R040~R045（孤立地、UART 交叉、输入电容、光耦限流、总线终端、SWD 对）；修复 R016 DNP open question 死代码、R012 有源振荡器误报、R009 序号网络漏检、R014 +/- 后缀、0Ω 值归一化、R002 NC 后缀、R033/R034/R036 多引脚、R006 输出脚降级、R018 false/false 组合；BOM/PCB 标志缺失默认 yes |
 | 0.12 | 外部评审落地：新增 R046~R056/R058/R060（复位固定电平、电源输出并联、USB-C CC、内核储能电容、料号多值、电源跳线、VREF 去耦、去耦数量、数据线 ESD、跨域直连、LED 电流估算、晶振引到排针、自动网络名）；R057 预留（需器件库）、R059 实现为 open question；修复 BOM TSV 解析（嘉立创导出实为制表符分隔）、R020 端口名/短名/互补对豁免、U 前缀分类覆盖（HDR/SIP/AMS1117）、复合引脚名分段、R007 引脚名电源证据与跳线穿越、R010 RES 扩展、R016 BOM 有值降 P3、R023 提升到 standard；合并流程：单共享网络不再判重、findingKey 稳定增强、严重度只升不降、截断保护 AI 结论并优先砍噪声 |
 | 0.13 | 截图页身份修复：页键带原理图维度（保留中文、碰撞加 UUID 后缀），逐页 SVG 不再互相覆盖；`comp.page`/`location.pages`/packets 写唯一“原理图 / 图页”标签与 `pageKey`；choosePage 裁剪前校验 uid 存在性与位号一致性（EasyEDA 图元 uid 为页内局部，跨页同 uid 是不同器件），全部不匹配输出占位；capture 用 collect 记录的 `svgViewBox` 校验缓存 SVG 身份，拒绝裁剪被覆盖的旧缓存；scope `page:` 兼容裸页名/页键且忽略大小写 |
-| 0.14 | CLI 模式：`--source cli --project <本地工程.eprj3>` 经桌面客户端内置 CLI（lceda-pro/easyeda-pro ≥ 4.1.70）`open --path` 建会话、`invoke --session --ext-uuid eda` 执行与桥接模式相同的只读采集代码、`session close --destroy` 收尾；`--cli` 指定可执行文件、`--cli-show` 显示窗口；**不解析 .eprj3 文件格式**，工程数据一律经 editor API 读取；传输层可注入执行器（自动化测试不依赖真实 EDA）；打开工程可能触发客户端文件格式升级，需提示备份 |
+| 0.14 | CLI 模式：`--source cli --project <本地工程.eprj3>` 经桌面客户端内置 CLI（lceda-pro/easyeda-pro ≥ 4.1.70）`open --path` 建会话、**取图页列表并通过 `openDocument` + `waitForDocumentReady` + `activateDocument` 打开并激活图页**（默认第一个，`--page` 指定）、`invoke --session --ext-uuid eda` 执行与桥接模式相同的只读采集代码、`session close --destroy` 收尾；`--cli` 指定可执行文件、`--cli-show` 显示窗口；**不解析 .eprj3 文件格式**，工程数据一律经 editor API 读取；传输层可注入执行器（自动化测试不依赖真实 EDA）；打开工程可能触发客户端文件格式升级，需提示备份 |
 
 ## 目录
 
@@ -375,9 +375,10 @@
 
 1. **探测 CLI**：`--cli <exe>` > 环境变量 `SCHEMATIC_REVIEW_CLI` > PATH 上的 `lceda-pro` / `easyeda-pro` > 常见安装目录。以 `<exe> --help` 头部版本为准，要求 ≥ 4.1.70；两个发行版同时存在时让用户选择，不混用。所有命令返回 JSON 信封 `{ok, value, error}`，`ok:false` 一律视为失败。
 2. **打开工程**：`<exe> open --path <工程.eprj3> --headless true`，取 `value.sessionId`。默认 headless；`--cli-show` 显示编辑器窗口。
-3. **执行采集**：`<exe> invoke --session <id> --ext-uuid eda --code <async 函数体> --timeout <ms>`，代码与桥接模式完全相同（只读 `eda.dmt_*` / `eda.sch_*` / `eda.sys_*`）；`--ext-uuid eda` 授予文件读权限，显式 `return` 的 gateway 兼容写法同样适用。
-4. **关闭会话**：`<exe> session close --session <id> --destroy` 在 finally 中执行，关闭失败不掩盖主错误；**绝不关闭或中止用户自己的会话**。
-5. **产物落点**：全部写入运行目录，不写工程目录；工程文件在审查过程中不被修改（编辑器打开工程本身可能升级文件格式，见风险）。
+3. **打开图页**：`open` 后工程没有活动文档，而网表、DRC、图元遍历、区域查询只对**已打开并激活**的文档有效。先用 `eda.dmt_Schematic.getAllSchematicPagesInfo()` 取图页列表（每项含 `uuid`/`name`/`parentSchematicUuid`），默认打开**第一个图页**；`--page <uuid|名称>` 指定其他图页，页名跨原理图可重复，重名时必须用 uuid（报错时列出候选与 uuid）。`eda.dmt_EditorControl.openDocument(uuid)` 返回标签页 ID（`undefined` 视为失败），随后 `waitForDocumentReady(tabId, 60000)` 等待就绪（≥ 4.1.79；更早版本轮询 `getDocumentReadyState` / `getCurrentDocumentInfo`），当前文档不是目标图页时再 `activateDocument(tabId)`。`openedPage`、`pageSelection`、`pageList`、`schematicCount` 写入 `collect.json`；工程含多个原理图且未指定 `--page` 时记录 warning，提示可用 `--page` 切换。
+4. **执行采集**：`<exe> invoke --session <id> --ext-uuid eda --code <async 函数体> --timeout <ms>`，代码与桥接模式完全相同（只读 `eda.dmt_*` / `eda.sch_*` / `eda.sys_*`）；`--ext-uuid eda` 授予文件读权限，显式 `return` 的 gateway 兼容写法同样适用。
+5. **关闭会话**：`<exe> session close --session <id> --destroy` 在 finally 中执行，关闭失败不掩盖主错误；**绝不关闭或中止用户自己的会话**。
+6. **产物落点**：全部写入运行目录，不写工程目录；工程文件在审查过程中不被修改（编辑器打开工程本身可能升级文件格式，见风险）。
 
 **风险**：打开旧版本工程可能被客户端升级文件格式（`.eprj3` 文件夹工程双向同步），文档与运行提示中建议用户备份；CLI/客户端版本漂移时以安装版本的 `--help` / `doc` 输出为准，不依赖记忆中的命令签名。
 

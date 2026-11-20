@@ -1,13 +1,13 @@
 ---
 name: easyeda-schematic-review
 description: >-
-  Review EasyEDA / 嘉立创EDA schematics from netlists with deterministic rules and
+  Review EasyEDA / 嘉立创EDA Pro schematics from netlists with deterministic rules and
   evidence-based AI review, then produce a self-contained HTML report with annotated
-  screenshots. Use when the user asks to 审查原理图、原理图评审、检查原理图、网表审查、
-  schematic review, netlist review, or provides a .enet file. v1 does not support
-  Protel2 .net. Live mode uses the easyeda-api-skill Bridge; CLI mode opens a
-  local .eprj3 project through the EasyEDA Pro desktop client's built-in CLI;
-  offline mode only needs a .enet file.
+  screenshots. Use when the user asks for a schematic review (Chinese phrasings such
+  as 审查原理图、原理图评审、检查原理图、网表审查 also count), a netlist review,
+  or provides a .enet file. v1 does not support Protel2 .net. Live mode uses the
+  easyeda-api-skill Bridge; CLI mode opens a local .eprj3 project through the
+  EasyEDA Pro desktop client's built-in CLI; offline mode only needs a .enet file.
 metadata:
   version: "1.0.0"
 ---
@@ -43,10 +43,9 @@ Before running, ask the user **two** things (quick, one message is fine):
 
    If the user directly provides an exported `.enet` file, skip the question and
    use `--source file`. **Never guess the mode or a project path** — if the
-   request is just “审查当前原理图 / review this schematic” without context, ask
-   which mode and, for CLI mode, for the absolute `.eprj3` path. When both
-   desktop editions (`lceda-pro` / `easyeda-pro`) are installed, also ask which
-   one to drive.
+   request is just "review this schematic" without context, ask which mode and,
+   for CLI mode, for the absolute `.eprj3` path. When both desktop editions
+   (`lceda-pro` / `easyeda-pro`) are installed, also ask which one to drive.
 2. **Where the report should be written** — pass it as `--out <dir>`. Only fall
    back to `tmp/schematic-review/<runId>` when the user says any location is
    fine. Never write into the EasyEDA project directory unless the user
@@ -88,6 +87,13 @@ they point to a local project file.
 2. Run `run --source cli --project <path> --out <dir>`. The skill opens the project
    in a headless editor session, collects everything through the CLI's `invoke`
    API, and closes the session it created when done (even on failure).
+   After `open` the project has **no document open**, and netlist/DRC/primitive
+   APIs only work on an opened, active document: the skill lists the schematic
+   pages and opens one — the **first page by default**; pass `--page <uuid|name>`
+   to review another (page names may repeat across schematics — then use the
+   uuid). `collect.json` records `openedPage` and `pageList`; when the project
+   has several schematics a warning is logged — tell the user which schematic
+   was reviewed and offer `--page` for a different one.
 3. **Never parse or write the `.eprj3` file format yourself.** Project data
    (netlist, BOM, DRC, pins, page SVGs, geometry) always comes from the read-only
    editor APIs, exactly like Bridge mode.
@@ -151,6 +157,7 @@ See `references/ai-prompts.md` for the exact output schema and prompt template.
 | `--project <file>` | cli collect/run | Absolute path of the local `.eprj3` — ask the user, never guess |
 | `--cli <exe>` | cli | CLI executable override (auto-detects `lceda-pro` / `easyeda-pro`) |
 | `--cli-show` | cli | Show the editor window (default: headless) |
+| `--page <uuid\|name>` | cli | Schematic page to review (default: first page). Use the uuid when page names repeat across schematics |
 | `--mode quick\|standard\|strict` | run/lint | quick = deterministic rules only; standard = v1 rules + AI; strict adds strict-only heuristics |
 | `--netlist <file>` | file collect | `.enet` path |
 | `--bom <file>` / `--drc <file>` | file collect | optional inputs |
@@ -222,7 +229,8 @@ If multiple EDA windows are connected, ask the user which one to use and pass
   evidence (EasyEDA primitive uids are page-local, so uid presence alone is not
   enough — designators must agree with the netlist) and that the cached SVG's
   viewBox matches the one recorded at collect time. Any mismatch shows a
-  placeholder (`截图不可用（页/器件不匹配）` / `（页面 SVG 与几何不匹配）`),
+  placeholder (`截图不可用（页/器件不匹配）` = "page/component mismatch", or
+  `截图不可用（页面 SVG 与几何不匹配）` = "page SVG does not match geometry"),
   never a wrong red box; missing geometry also placeholders instead of drawing
   a zero-size box at the origin.
 - Only P0/P1 and some P2 findings get screenshots; P0/P1 are exempt from the
@@ -232,7 +240,9 @@ If multiple EDA windows are connected, ask the user which one to use and pass
 ## References
 
 - `references/netlist-format.md` — `.enet` structure and field mapping.
-- `references/review-checklist.md` — 按域的完整审查清单（约 280 项，含 `[D]` 规则 / `[A]` AI / `[M]` 数据手册 / `[L]` PCB 标记）。AI 逐包审查时按域选取，不要只依赖 R001~R060。
+- `references/review-checklist.md` — domain-by-domain review checklist (~280 items;
+  `[D]` deterministic rules / `[A]` AI judgment / `[M]` datasheet / `[L]` PCB-only).
+  Use it to pick domains during packet review; do not rely on R001–R060 alone.
 - `references/rule-catalog.md` — rule IDs, severity, evidence, false-positive boundaries.
 - `references/ai-prompts.md` — packet prompt, output schema, evidence rules.
 - `references/drc-rules.md` — DRC rule name explanations.
