@@ -25,8 +25,9 @@ function usage() {
   return `easyeda-schematic-review ${VERSION}
 
 用法:
-  review.mjs run --source live|file [--mode quick|standard|strict] [--out DIR]
-  review.mjs collect --source live|file --netlist design.enet --out DIR
+  review.mjs run --source live|cli|file [--mode quick|standard|strict] [--out DIR]
+  review.mjs run --source cli --project <本地工程.eprj3> --out DIR
+  review.mjs collect --source live|cli|file --netlist design.enet --out DIR
   review.mjs lint --out DIR
   review.mjs packets --out DIR
   review.mjs merge --out DIR [--ai-dir DIR]
@@ -36,6 +37,9 @@ function usage() {
 
 常用参数:
   --netlist <file>      离线 .enet
+  --project <file>      CLI 模式：本地工程 .eprj3 路径（请向用户确认；不解析文件格式，通过 CLI API 读取）
+  --cli <exe>           CLI 可执行文件（默认自动探测 lceda-pro / easyeda-pro）
+  --cli-show            CLI 模式显示编辑器窗口（默认 headless 打开）
   --bom <file>          BOM CSV
   --drc <file>          DRC JSON
   --scope <expr>        page:P1 / net:VCC / designator:U1 / category:power
@@ -111,6 +115,8 @@ function initManifest(outDir, opts, source) {
     runId,
     runAt: now,
     source: opts.source,
+    transport: opts.source === 'cli' ? 'cli' : (opts.source === 'live' ? 'bridge' : 'file'),
+    projectPath: opts.project || null,
     mode: opts.mode,
     noAi: opts.noAi,
     status: 'initialized',
@@ -168,7 +174,11 @@ async function doCollect(opts, outDir, log) {
   initManifest(outDir, opts, {});
   updateManifest(outDir, { status: 'collecting' });
   let collectInfo = null;
-  if (opts.source === 'live') {
+  if (opts.source === 'live' || opts.source === 'cli') {
+    if (opts.source === 'cli') {
+      if (!opts.project) throw new CliError('CLI 模式需要 --project <本地工程.eprj3>（请先向用户确认工程路径）', 3);
+      if (!fs.existsSync(opts.project)) throw new CliError(`工程路径不存在: ${opts.project}`, 3);
+    }
     try {
       collectInfo = await collectLive({
         outDir,
@@ -180,11 +190,16 @@ async function doCollect(opts, outDir, log) {
         geometry: !opts.noScreenshots,
         skillDir: SKILL_DIR,
         logger: log,
+        cli: opts.source === 'cli' ? {
+          projectPath: opts.project,
+          executable: opts.cliPath,
+          headless: !opts.cliShow,
+        } : null,
       });
     } catch (err) {
       throw new CliError(err.message || String(err), 2);
     }
-    opts.windowId = collectInfo.windowId;
+    opts.windowId = collectInfo.windowId || null;
   } else {
     if (!opts.netlist) throw new CliError('离线模式需要 --netlist <design.enet>', 3);
     if (!fs.existsSync(opts.netlist)) throw new CliError(`网表文件不存在: ${opts.netlist}`, 3);
@@ -201,7 +216,7 @@ async function doCollect(opts, outDir, log) {
   const drcProvided = fs.existsSync(drcPath);
   const drc = drcProvided ? loadDrc(drcPath) : [];
   const geometry = loadGeometry(outDir);
-  const source = opts.source === 'live' ? sourceFromCollect(collectInfo) : {
+  const source = (opts.source === 'live' || opts.source === 'cli') ? sourceFromCollect(collectInfo) : {
     project: opts.netlist ? path.basename(opts.netlist, path.extname(opts.netlist)) : null,
     board: null, schematic: null, edaVersion: null,
   };
@@ -229,6 +244,11 @@ async function doCollect(opts, outDir, log) {
   updateManifest(outDir, {
     status: 'collected',
     windowId: opts.windowId || null,
+    transport: collectInfo?.transport || (opts.source === 'file' ? 'file' : null),
+    projectPath: collectInfo?.projectPath || opts.project || null,
+    cliPath: collectInfo?.cliPath || null,
+    cliVersion: collectInfo?.cliVersion || null,
+    sessionId: collectInfo?.sessionId || null,
     project: source.project,
     board: source.board,
     schematic: source.schematic,
@@ -352,14 +372,17 @@ function normalizeOpts(argv) {
   const raw = parseArgs(argv);
   const mode = raw.mode || 'standard';
   if (!['quick', 'standard', 'strict'].includes(mode)) throw new CliError(`未知 --mode: ${mode}`, 1);
-  const source = raw.source || (raw.netlist ? 'file' : 'live');
-  if (!['live', 'file'].includes(source)) throw new CliError(`未知 --source: ${source}`, 1);
+  const source = raw.source || (raw.netlist ? 'file' : (raw.project ? 'cli' : 'live'));
+  if (!['live', 'cli', 'file'].includes(source)) throw new CliError(`未知 --source: ${source}`, 1);
   return {
     raw,
     source,
     mode,
     out: raw.out || null,
     netlist: raw.netlist || null,
+    project: raw.project || null,
+    cliPath: raw.cli || process.env.SCHEMATIC_REVIEW_CLI || null,
+    cliShow: Boolean(raw['cli-show']),
     bom: raw.bom || null,
     drc: raw.drc || null,
     aiDir: raw['ai-dir'] || null,

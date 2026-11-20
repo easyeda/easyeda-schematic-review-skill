@@ -39,8 +39,9 @@ does not review PCB layout, routing, signal integrity, or simulation.
 | --- | --- | --- |
 | Claude Code (or another Agent Skills tool) | AI review | Recommended; the AI step runs inside the agent session |
 | Node.js 18 or newer | Everything | Check with `node -v` |
-| EasyEDA Pro / 嘉立创EDA 专业版 | Live mode | The project must be open in the editor |
-| `easyeda-api-skill` + `run-api-gateway.eext` | Live mode | The Bridge that lets the skill export data from EasyEDA |
+| EasyEDA Pro / 嘉立创EDA 专业版 | Bridge / CLI mode | Bridge mode: the project must be open in the editor |
+| `easyeda-api-skill` + `run-api-gateway.eext` | Bridge mode | The Bridge that lets the skill export data from EasyEDA |
+| EasyEDA Pro / JLCEDA Pro desktop client with CLI (v4.1.70+) | CLI mode | Reviews a local `.eprj3` project without the Bridge; the skill opens and closes the editor session itself |
 | An exported `.enet` netlist | Offline mode | Export from EasyEDA with netlist type **JLCEDA** |
 
 ### Installation
@@ -130,15 +131,27 @@ or in English:
 Review the current schematic.
 ```
 
-Claude Code reads [SKILL.md](SKILL.md), asks where you want the report saved,
-collects the data, runs the rules, reviews the netlist packet by packet, and
-tells you the final report path.
+Claude Code reads [SKILL.md](SKILL.md), asks **which connection mode** to use
+and where the report should be saved, collects the data, runs the rules,
+reviews the netlist packet by packet, and tells you the final report path.
+
+Connection modes:
+
+| Mode | Adopt when | Requirement |
+| --- | --- | --- |
+| Bridge (`--source live`) | The project is open in a running EasyEDA editor | `easyeda-api-skill` Bridge + `run-api-gateway.eext` loaded |
+| CLI (`--source cli`) | You have a local/offline project file to review | Desktop client v4.1.70+ (built-in CLI) + the project's `.eprj3` path |
+
+The agent asks this question on every review unless you already named the mode
+or provided an exported `.enet` file (then offline `--source file` is used
+directly). It never guesses a mode or a project path.
 
 Useful prompts:
 
 | You want | Say |
 | --- | --- |
 | Full review (rules + AI) | “审查当前原理图” / “Review the current schematic” |
+| Review a local project file | “审查本地工程 C:\boards\MyBoard.eprj3” / “Review C:\boards\MyBoard.eprj3” |
 | Fast rules-only review | “快速审查原理图，不用 AI” / “Quick review, no AI” |
 | Review only power circuitry | “只审查电源部分” / “Review the power section only” |
 | Review one component | “重点看 U1” / “Focus on U1” |
@@ -174,6 +187,21 @@ Live rules-only review (EasyEDA + Bridge required):
 node "$SKILL_DIR/scripts/review.mjs" run --source live --mode quick
 ```
 
+CLI rules-only review (local `.eprj3` project through the desktop client, no Bridge):
+
+```bash
+node "$SKILL_DIR/scripts/review.mjs" run \
+  --source cli --project "C:/path/to/MyBoard.eprj3" --mode quick
+```
+
+> **CLI mode never parses the `.eprj3` file.** The skill calls the desktop
+> client's built-in CLI (`lceda-pro` / `easyeda-pro`, v4.1.70+): it opens the
+> project in an editor session and reads netlist, BOM, DRC, pin data, page SVGs
+> and geometry through the same read-only editor APIs as Bridge mode. The
+> session it opened is closed when the run finishes (even on failure).
+> Opening a project may upgrade its file format to the current client version
+> (folder projects are two-way synced) — back it up first if that matters.
+
 Write the report to a folder of your choice:
 
 ```bash
@@ -201,7 +229,10 @@ Add `--no-ai` to `standard`/`strict` to keep all rules but skip the AI step.
 
 | Option | Description |
 | --- | --- |
-| `--source live\|file` | Collect from EasyEDA, or read an exported netlist |
+| `--source live\|cli\|file` | `live` = Bridge, `cli` = desktop-client CLI on a local `.eprj3`, `file` = exported netlist |
+| `--project <file>` | CLI mode: absolute path of the local `.eprj3` project (ask the user; never guessed) |
+| `--cli <exe>` | CLI mode: executable override; otherwise auto-detects `lceda-pro` / `easyeda-pro` |
+| `--cli-show` | CLI mode: show the editor window (default: headless) |
 | `--netlist <file>` | Path to the `.enet` file (offline mode) |
 | `--bom <file>` | Optional BOM CSV for cross-checks |
 | `--drc <file>` | Optional DRC JSON exported from EasyEDA |
@@ -320,6 +351,7 @@ its false-positive boundaries, and
 | Symptom | Fix |
 | --- | --- |
 | “未发现 EasyEDA Bridge” / Bridge not found | Start `easyeda-api-skill`'s Bridge and confirm `run-api-gateway.eext` is loaded in EasyEDA |
+| “未找到 EasyEDA CLI” / CLI not found | Install EasyEDA Pro / JLCEDA Pro desktop client v4.1.70+, keep `lceda-pro` / `easyeda-pro` on `PATH`, or pass `--cli <exe>`; Bridge mode (`--source live`) still works without the CLI |
 | Bridge is running but no EDA window | Open a project in EasyEDA; check `http://127.0.0.1:49620/eda-windows` |
 | Multiple EDA windows detected | Pass `--window-id <id>`; find IDs in `/eda-windows` |
 | `.net` / `.asc` / `.tel` / `.dnet` rejected | v1 supports only EasyEDA `.enet`; export a **JLCEDA** netlist |
@@ -397,8 +429,9 @@ node --test tests/rules.test.mjs
 | --- | --- | --- |
 | Claude Code（或其他 Agent Skills 工具） | AI 审查 | 推荐；AI 审查在会话内完成 |
 | Node.js 18 或更新版本 | 全部功能 | 用 `node -v` 检查 |
-| 嘉立创EDA 专业版 | 实时模式 | 需要在编辑器中打开目标工程 |
-| `easyeda-api-skill` + `run-api-gateway.eext` | 实时模式 | 用于从 EasyEDA 导出数据 |
+| 嘉立创EDA 专业版 | 桥接 / CLI 模式 | 桥接模式需要在编辑器中打开目标工程 |
+| `easyeda-api-skill` + `run-api-gateway.eext` | 桥接模式 | 用于从 EasyEDA 导出数据 |
+| 嘉立创EDA专业版 / EasyEDA Pro 桌面客户端（含 CLI，≥ 4.1.70） | CLI 模式 | 直接审查本地 `.eprj3` 工程，无需 Bridge；会话由本 Skill 打开并自动关闭 |
 | 导出的 `.enet` 网表 | 离线模式 | 在 EasyEDA 中按 **JLCEDA** 类型导出 |
 
 ### 安装
@@ -486,14 +519,25 @@ curl http://127.0.0.1:49620/health
 Review the current schematic.
 ```
 
-Claude Code 会读取 [SKILL.md](SKILL.md)，先询问报告输出目录，再自动完成取数、
-规则检查、逐包 AI 审查，最后告诉你报告路径。
+Claude Code 会读取 [SKILL.md](SKILL.md)，先询问**使用哪种连接模式**与报告输出目录，
+再自动完成取数、规则检查、逐包 AI 审查，最后告诉你报告路径。
+
+连接模式：
+
+| 模式 | 适用场景 | 前置条件 |
+| --- | --- | --- |
+| 桥接（`--source live`） | 已在运行中的 EasyEDA 编辑器里打开待审查工程 | `easyeda-api-skill` Bridge + 已加载 `run-api-gateway.eext` |
+| CLI（`--source cli`） | 审查本地 / 离线工程文件 | 桌面客户端 v4.1.70+（内置 CLI）+ 工程 `.eprj3` 路径 |
+
+除非你已经说明模式或直接提供 `.enet` 网表文件（此时直接走离线 `--source file`），
+否则每次审查都会先问这个问题；不会自行猜测模式或工程路径。
 
 常用说法：
 
 | 你想做什么 | 可以这样说 |
 | --- | --- |
 | 完整审查（规则 + AI） | “审查当前原理图” |
+| 审查本地工程文件 | “审查本地工程 C:\boards\MyBoard.eprj3” |
 | 只跑规则，不用 AI | “快速审查原理图，不用 AI” |
 | 只看电源部分 | “只审查电源部分” |
 | 重点看某个器件 | “重点看 U1” |
@@ -529,6 +573,19 @@ node "$SKILL_DIR/scripts/review.mjs" run \
 node "$SKILL_DIR/scripts/review.mjs" run --source live --mode quick
 ```
 
+CLI 规则审查（本地 `.eprj3` 工程，经桌面客户端 CLI，无需 Bridge）：
+
+```bash
+node "$SKILL_DIR/scripts/review.mjs" run \
+  --source cli --project "C:/path/to/MyBoard.eprj3" --mode quick
+```
+
+> **CLI 模式不解析 `.eprj3` 文件格式。** 本 Skill 调用桌面客户端内置 CLI
+> （`lceda-pro` / `easyeda-pro`，v4.1.70+）：在编辑器会话中打开工程，再通过与桥接
+> 模式完全相同的只读 editor API 读取网表、BOM、DRC、引脚数据、页面 SVG 与几何。
+> 运行结束（含失败）会自动关闭它创建的会话。打开工程可能把文件格式升级到当前
+> 客户端版本（文件夹工程双向同步），介意时请先备份。
+
 指定报告目录：
 
 ```bash
@@ -555,7 +612,10 @@ node "$SKILL_DIR/scripts/review.mjs" run \
 
 | 参数 | 说明 |
 | --- | --- |
-| `--source live\|file` | 从 EasyEDA 实时取数，或读取导出的网表 |
+| `--source live\|cli\|file` | `live` 走 Bridge，`cli` 经桌面客户端 CLI 审查本地 `.eprj3`，`file` 读导出的网表 |
+| `--project <file>` | CLI 模式：本地 `.eprj3` 工程绝对路径（必须向用户确认，不得猜测） |
+| `--cli <exe>` | CLI 模式：指定可执行文件；默认自动探测 `lceda-pro` / `easyeda-pro` |
+| `--cli-show` | CLI 模式：显示编辑器窗口（默认 headless 打开） |
 | `--netlist <file>` | 离线模式下的 `.enet` 路径 |
 | `--bom <file>` | 可选的 BOM CSV，用于一致性检查 |
 | `--drc <file>` | 可选的 DRC JSON |
@@ -665,6 +725,7 @@ design.enet ────────┘                     │
 | 现象 | 处理 |
 | --- | --- |
 | 提示“未发现 EasyEDA Bridge” | 启动 `easyeda-api-skill` 的 Bridge，并确认 EasyEDA 已加载 `run-api-gateway.eext` |
+| 提示“未找到 EasyEDA CLI” | 安装嘉立创EDA专业版 / EasyEDA Pro 桌面客户端 v4.1.70+，把 `lceda-pro` / `easyeda-pro` 加入 `PATH`，或用 `--cli <exe>` 指定；没有 CLI 时仍可用桥接模式（`--source live`） |
 | Bridge 已启动但没有 EDA 窗口 | 在 EasyEDA 中打开工程；访问 `http://127.0.0.1:49620/eda-windows` 检查 |
 | 检测到多个 EDA 窗口 | 加 `--window-id <id>`，窗口 ID 可从 `/eda-windows` 获取 |
 | `.net` / `.asc` / `.tel` / `.dnet` 被拒绝 | v1 只支持 EasyEDA `.enet`，请重新导出 **JLCEDA** 类型网表 |

@@ -10,6 +10,10 @@ import { classifyNet, classifyPinName, classifyComponent, dnpInfo } from '../scr
 import { mergeFindings } from '../scripts/merge-findings.mjs';
 import { renderReport } from '../scripts/render-html.mjs';
 import { captureScreenshots, choosePage } from '../scripts/capture-screenshots.mjs';
+import { collectLive } from '../scripts/collect-live.mjs';
+import {
+  parseCliVersion, versionAtLeast, detectCli, openCliTransport, cliInvoke, runCliJson, CLI_MIN_VERSION,
+} from '../scripts/lib/cli-transport.mjs';
 import { readJson, writeJson, ensureDir, pageFileKeyOf, pageLabelOf } from '../scripts/lib/util.mjs';
 
 const FIX = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'projects', 'ne555.enet');
@@ -1137,4 +1141,129 @@ test('choosePage rejects foreign same-uid parts and tolerates net neighbors', ()
   // netlist does not know that uid — only the netlist-confirmed page wins.
   const byDesignator = choosePage({ location: { pages: [], designators: ['U5'], uids: [], nets: [] } }, model);
   assert.equal(byDesignator.key, 'Schematic1__P1');
+});test('cli transport parses versions and rejects unsupported clients', () => {
+  assert.deepEqual(parseCliVersion('JLCEDA Pro 4.1.103.abcdef01\nUsage: ...'), [4, 1, 103]);
+  assert.deepEqual(parseCliVersion('EasyEDA Pro 4.2.0'), [4, 2, 0]);
+  assert.equal(parseCliVersion('no version here'), null);
+  assert.equal(versionAtLeast([4, 1, 70], CLI_MIN_VERSION), true);
+  assert.equal(versionAtLeast([4, 1, 69], CLI_MIN_VERSION), false);
+  assert.equal(versionAtLeast([4, 2, 0], CLI_MIN_VERSION), true);
+  assert.equal(versionAtLeast([5, 0, 0], CLI_MIN_VERSION), true);
+  assert.equal(versionAtLeast(null, CLI_MIN_VERSION), false);
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sch-review-test-'));
+  const exe = path.join(dir, 'fake-cli.exe');
+  fs.writeFileSync(exe, '', 'utf8');
+  const spawnFn = (candidate, args) => {
+    if (args[0] === '--help') return { status: 0, stdout: 'JLCEDA Pro 4.1.103.abcdef01\n' };
+    return { status: 0, stdout: JSON.stringify({ ok: true, value: null }) };
+  };
+  const found = detectCli({ explicit: exe, spawnFn });
+  assert.equal(found.executable, exe);
+  assert.deepEqual(found.version, [4, 1, 103]);
+  // Too old: openCliTransport refuses before opening a session.
+  let opened = false;
+  const oldSpawn = (candidate, args) => {
+    if (args[0] === '--help') return { status: 0, stdout: 'JLCEDA Pro 4.1.50\n' };
+    opened = true;
+    return { status: 0, stdout: JSON.stringify({ ok: true, value: {} }) };
+  };
+  assert.throws(() => openCliTransport({ projectPath: 'x.eprj3', executable: exe, spawnFn: oldSpawn }), /版本过低/);
+  assert.equal(opened, false);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('cli transport opens a session, invokes with eda identity, and closes', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sch-review-test-'));
+  const exe = path.join(dir, 'fake-cli.exe');
+  fs.writeFileSync(exe, '', 'utf8');
+  const calls = [];
+  const spawnFn = (candidate, args) => {
+    calls.push(args);
+    if (args[0] === '--help') return { status: 0, stdout: 'JLCEDA Pro 4.1.103\n' };
+    if (args[0] === 'open') {
+      return { status: 0, stdout: JSON.stringify({ ok: true, value: { sessionId: 'sess-1', path: args[2], headless: true } }) };
+    }
+    if (args[0] === 'invoke') {
+      const code = args[args.indexOf('--code') + 1];
+      return { status: 0, stdout: JSON.stringify({ ok: true, value: { ran: code } }) };
+    }
+    if (args[0] === 'session') return { status: 0, stdout: JSON.stringify({ ok: true, value: { closed: true } }) };
+    return { status: 0, stdout: JSON.stringify({ ok: true, value: null }) };
+  };
+  const t = openCliTransport({ projectPath: 'C:/proj/MyBoard.eprj3', executable: exe, spawnFn });
+  assert.equal(t.transport, 'cli');
+  assert.equal(t.sessionId, 'sess-1');
+  const openArgs = calls.find(a => a[0] === 'open');
+  assert.ok(openArgs.includes('--path') && openArgs.includes('--headless'));
+  const value = t.execute('return 1 + 1', { timeoutMs: 5000 });
+  assert.equal(value.ran, 'return 1 + 1');
+  const invokeArgs = calls.find(a => a[0] === 'invoke');
+  assert.deepEqual(invokeArgs.slice(0, 6), ['invoke', '--session', 'sess-1', '--ext-uuid', 'eda', '--code']);
+  assert.equal(invokeArgs[invokeArgs.indexOf('--timeout') + 1], '5000');
+  t.close();
+  const closeArgs = calls.find(a => a[0] === 'session');
+  assert.deepEqual(closeArgs, ['session', 'close', '--session', 'sess-1', '--destroy']);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('cli transport surfaces ok:false envelopes as errors', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sch-review-test-'));
+  const exe = path.join(dir, 'fake-cli.exe');
+  fs.writeFileSync(exe, '', 'utf8');
+  const spawnFn = (candidate, args) => {
+    if (args[0] === '--help') return { status: 0, stdout: 'JLCEDA Pro 4.1.103\n' };
+    if (args[0] === 'invoke') {
+      return { status: 0, stdout: JSON.stringify({ ok: false, error: { code: 'EXECUTION_ERROR', message: 'boom' } }) };
+    }
+    return { status: 0, stdout: JSON.stringify({ ok: true, value: { sessionId: 's2' } }) };
+  };
+  assert.throws(() => cliInvoke(exe, 's2', 'return 1', { spawnFn }), /boom/);
+  // Non-JSON output (e.g. GUI noise) is an error, never silently ignored.
+  const badSpawn = () => ({ status: 0, stdout: 'not json' });
+  assert.throws(() => runCliJson(exe, ['invoke'], { spawnFn: badSpawn }), /不是 JSON/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('collectLive runs the full collection over an injected executor (no Bridge)', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sch-review-test-'));
+  const enet = JSON.stringify(netlist({
+    a: comp('gge1', 'R1', { 'Add into BOM': 'yes', 'Convert to PCB': 'yes' }, [['1', '', 'N1'], ['2', '', 'N2']]),
+  }));
+  const exec = async (code) => {
+    if (code.includes('getNetlistFile')) {
+      return {
+        ok: true,
+        doc: { uuid: 'p1', name: 'P1' },
+        project: { name: 'Proj' },
+        version: '4.1.103',
+        pagesInfo: [{ uuid: 'p1', name: 'P1', pageUuid: 'p1' }],
+        schematicsInfo: [],
+        netlist: enet,
+        bom: 'Designator\tValue\nR1\t1k\n',
+        drc: [],
+        pins: [],
+        components: [{ uid: 'gge1', designator: 'R1', primitiveId: 'e1', bbox: { minX: 0, minY: 0, maxX: 10, maxY: 5 } }],
+        svg: '<svg viewBox="0 0 100 100"></svg>',
+      };
+    }
+    return { ok: true };
+  };
+  const summary = await collectLive({
+    outDir: dir,
+    executeCode: exec,
+    transportInfo: { transport: 'test', projectPath: 'C:/proj/MyBoard.eprj3' },
+  });
+  assert.equal(summary.transport, 'test');
+  assert.equal(summary.projectPath, 'C:/proj/MyBoard.eprj3');
+  assert.equal(summary.pageName, 'P1');
+  assert.ok(fs.existsSync(path.join(dir, 'design.enet')));
+  assert.ok(fs.existsSync(path.join(dir, 'bom.csv')));
+  const geo = readJson(path.join(dir, 'geometry.json'));
+  assert.ok(geo.pages.__current__);
+  assert.equal(geo.pages.P1.components.gge1.designator, 'R1');
+  assert.deepEqual(geo.pages.__current__.components.gge1.bbox, { minX: 0, minY: 0, maxX: 10, maxY: 5 });
+  const collect = readJson(path.join(dir, 'collect.json'));
+  assert.equal(collect.transport, 'test');
+  fs.rmSync(dir, { recursive: true, force: true });
 });

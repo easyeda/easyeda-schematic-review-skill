@@ -5,6 +5,7 @@ import {
   ensureDir, writeJson, writeText, createLogger, pageLabelOf, pageFileKeyOf,
 } from './lib/util.mjs';
 import { findBridge, execute, resolveWindow, launchBridge, bridgeUnavailableMessage } from './bridge.mjs';
+import { openCliTransport } from './lib/cli-transport.mjs';
 
 const COMPONENT_SNAPSHOT = `
 async function __bbox(id) {
@@ -111,7 +112,7 @@ function pageCatalog(parts = {}) {
   return { pages: [...pages.values()], schematics };
 }
 
-async function collectCurrentPage(bridgeUrl, windowId, includeGeometry) {
+async function collectCurrentPage(exec, includeGeometry) {
   const code = `${COMPONENT_SNAPSHOT}
 return await (async () => {
   const result = { ok: true };
@@ -136,10 +137,10 @@ return await (async () => {
   result.svg = await __pageSvg();
   return result;
 })()`;
-  return execute(bridgeUrl, code, { windowId, timeoutMs: 180000 });
+  return exec(code, { timeoutMs: 180000 });
 }
 
-async function collectPage(bridgeUrl, windowId, page, includeGeometry) {
+async function collectPage(exec, page, includeGeometry) {
   const uuid = page.uuid || page.pageUuid || page.id;
   const uuidLiteral = uuid ? JSON.stringify(String(uuid)) : 'null';
   const code = `${COMPONENT_SNAPSHOT}
@@ -152,12 +153,11 @@ return await (async () => {
   result.svg = await __pageSvg();
   return result;
 })()`;
-  return execute(bridgeUrl, code, { windowId, timeoutMs: 180000 });
+  return exec(code, { timeoutMs: 180000 });
 }
 
-export async function collectLive(options = {}) {
-  const log = options.logger || createLogger();
-  const outDir = ensureDir(options.outDir || path.join(process.cwd(), 'tmp', 'schematic-review', 'live'));
+/** Bridge transport: discover/start the HTTP bridge and pick the EDA window. */
+async function openBridgeTransport(options, log) {
   let bridge = null;
   if (options.bridgeUrl) {
     bridge = { url: options.bridgeUrl.replace(/\/$/, ''), port: Number(new URL(options.bridgeUrl).port || 49620) };
@@ -170,9 +170,66 @@ export async function collectLive(options = {}) {
     else throw new Error(bridgeUnavailableMessage());
   }
   const windowId = await resolveWindow(bridge.url, options.windowId);
-  log.info('collect-live start', { port: bridge.port, windowId });
+  log.info('collect-live start', { transport: 'bridge', port: bridge.port, windowId });
+  return {
+    transport: 'bridge',
+    bridgePort: bridge.port,
+    windowId,
+    execute: (code, { timeoutMs = 120000 } = {}) => execute(bridge.url, code, { windowId, timeoutMs }),
+    close: null,
+  };
+}
 
-  const base = await collectCurrentPage(bridge.url, windowId, options.geometry !== false);
+/**
+ * Transport selection: injected executor (tests) > CLI session (local .eprj3
+ * opened through the desktop client's CLI) > HTTP bridge. All three run the
+ * same read-only collection code; the project data is always read through the
+ * editor APIs — the .eprj3 file format is never parsed by this skill.
+ */
+async function openTransport(options, log) {
+  if (typeof options.executeCode === 'function') {
+    return { transport: 'custom', ...(options.transportInfo || {}), execute: options.executeCode, close: options.closeTransport || null };
+  }
+  if (options.cli?.projectPath) {
+    const cli = openCliTransport({
+      projectPath: options.cli.projectPath,
+      executable: options.cli.executable || null,
+      headless: options.cli.headless !== false,
+      logger: log,
+    });
+    return {
+      transport: 'cli',
+      cliPath: cli.executable,
+      cliVersion: cli.cliVersion,
+      sessionId: cli.sessionId,
+      projectPath: cli.projectPath,
+      execute: cli.execute,
+      close: cli.close,
+    };
+  }
+  return openBridgeTransport(options, log);
+}
+
+export async function collectLive(options = {}) {
+  const log = options.logger || createLogger();
+  const outDir = ensureDir(options.outDir || path.join(process.cwd(), 'tmp', 'schematic-review', 'live'));
+  const t = await openTransport(options, log);
+  try {
+    return await collectWithTransport(options, outDir, log, t);
+  } finally {
+    if (t.close) {
+      try {
+        const closed = await t.close();
+        log.info('transport closed', { transport: t.transport, closed });
+      } catch (err) {
+        log.warn('transport close failed', { transport: t.transport, error: String(err) });
+      }
+    }
+  }
+}
+
+async function collectWithTransport(options, outDir, log, t) {
+  const base = await collectCurrentPage(t.execute, options.geometry !== false);
   if (base.netlistError && !base.netlist) throw new Error(`网表导出失败: ${base.netlistError}`);
   if (!base.netlist) throw new Error('网表为空');
   writeText(path.join(outDir, 'design.enet'), base.netlist);
@@ -231,13 +288,13 @@ export async function collectLive(options = {}) {
     try {
       let pageItems = catalog.pages;
       if (!pageItems.length) {
-        const pageList = await execute(bridge.url, `
+        const pageList = await t.execute(`
           return await (async () => {
             const pages = await eda.dmt_Schematic.getAllSchematicPagesInfo();
             const schematics = await eda.dmt_Schematic.getAllSchematicsInfo().catch(() => []);
             const cur = await eda.dmt_SelectControl.getCurrentDocumentInfo().catch(() => null);
             return { pages: pages || [], schematics: schematics || [], current: cur };
-          })()`, { windowId, timeoutMs: 30000 });
+          })()`, { timeoutMs: 30000 });
         const fallback = pageCatalog({ pagesInfo: pageList.pages, schematicsInfo: pageList.schematics });
         for (const [uuid, name] of fallback.schematics) {
           if (!catalog.schematics.has(uuid)) catalog.schematics.set(uuid, name);
@@ -254,7 +311,7 @@ export async function collectLive(options = {}) {
         const pSchematicUuid = p.parentSchematicUuid || null;
         const pSchematicName = pSchematicUuid ? (catalog.schematics.get(pSchematicUuid) || null) : null;
         const pKey = pageFileKeyOf(pSchematicName, pName, pUuid, usedPageKeys);
-        const snap = await collectPage(bridge.url, windowId, p, options.geometry !== false);
+        const snap = await collectPage(t.execute, p, options.geometry !== false);
         const pg = {
           pageUuid: pUuid,
           pageName: pName,
@@ -282,9 +339,9 @@ export async function collectLive(options = {}) {
         pages[pKey] = pg;
       }
       if (originalUuid) {
-        await execute(bridge.url, `
+        await t.execute(`
           return await (async () => { await eda.dmt_EditorControl.openDocument(${JSON.stringify(String(originalUuid))}); return { ok: true }; })()`,
-          { windowId, timeoutMs: 30000 }).catch(() => null);
+          { timeoutMs: 30000 }).catch(() => null);
       }
     } catch (err) {
       log.warn('map-pages failed', { error: String(err) });
@@ -296,9 +353,9 @@ export async function collectLive(options = {}) {
     const ids = [...new Set(base.drc.flatMap(d => (d.primitives || []).map(p => p.primitiveId)).filter(Boolean))].slice(0, 200);
     for (let i = 0; i < ids.length; i += 8) {
       const chunk = ids.slice(i, i + 8);
-      const results = await Promise.all(chunk.map(id => execute(bridge.url, `
+      const results = await Promise.all(chunk.map(id => t.execute(`
           return await (async () => { try { return await eda.sch_Primitive.getPrimitivesBBox([${JSON.stringify(id)}]); } catch { return null; } })()`,
-        { windowId, timeoutMs: 15000 }).catch(() => null)));
+        { timeoutMs: 15000 }).catch(() => null)));
       chunk.forEach((id, k) => {
         const bb = results[k];
         if (bb && Number.isFinite(bb.minX) && bb.maxX > bb.minX && bb.maxY > bb.minY) {
@@ -331,8 +388,13 @@ export async function collectLive(options = {}) {
     schematicUuid,
     schematicName,
     pageLabel: pageLabelOf({ pageName, schematicName }),
-    windowId,
-    bridgePort: bridge.port,
+    transport: t.transport,
+    windowId: t.windowId || null,
+    bridgePort: t.bridgePort || null,
+    cliPath: t.cliPath || null,
+    cliVersion: t.cliVersion || null,
+    sessionId: t.sessionId || null,
+    projectPath: t.projectPath || null,
   };
   writeJson(path.join(outDir, 'collect.json'), summary);
   log.info('collect-live done', summary);

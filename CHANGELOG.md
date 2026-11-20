@@ -11,6 +11,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added / 新增
 
+- CLI mode: `--source cli --project <local .eprj3>` reviews a local project
+  through the EasyEDA Pro / JLCEDA Pro desktop client's built-in CLI (v4.1.70+).
+  The skill opens the project in a session (`open --path`, headless by default;
+  `--cli-show` shows the window), reads netlist, BOM, DRC, pins, page SVGs and
+  geometry through the same read-only editor APIs as Bridge mode, and closes the
+  session it created (`session close --destroy`) even on failure. The `.eprj3`
+  file format is never parsed by the skill. CLI detection covers both editions
+  (`lceda-pro` / `easyeda-pro`) with a `--cli <exe>` override; the transport
+  layer is injectable, so the collection pipeline is covered by tests without a
+  real EDA. Opening a project may upgrade its file format (two-way-synced folder
+  projects) — the docs advise a backup.
+  CLI 模式：`--source cli --project <本地工程.eprj3>` 经桌面客户端内置 CLI（v4.1.70+）
+  审查本地工程。在会话中打开工程（默认 headless，`--cli-show` 显示窗口），通过与桥接模式
+  相同的只读 editor API 读取网表、BOM、DRC、引脚、页面 SVG 与几何，并在 finally 中关闭
+  自建会话（`session close --destroy`）；**不解析 .eprj3 文件格式**。CLI 自动探测两个发行版
+  （lceda-pro / easyeda-pro），可用 `--cli` 指定；传输层支持注入执行器，采集管线可脱离真实
+  EDA 做回归测试。打开工程可能升级文件格式，文档提示先备份。
+
 - Thirteen new deterministic rules from an external schematic-review post-mortem
   (55 total, `R001`–`R060`): `R046` reset pin tied to a rail (P0 to GND / P1 to power),
   `R047` paralleled power outputs on one rail, `R048` USB-C CC1/CC2 missing Rp/Rd,
@@ -38,12 +56,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   新增 6 条确定性规则（当时共 42 条）：R040 孤立地网络、R041 UART 同方向互连、
   R042 稳压器输入电容、R043 光耦输入限流、R044 CAN/RS-485 终端（strict）、
   R045 SWD 调试对完整性（strict）。
-- 36 new regression tests (72 total) covering the BOM TSV contract, noise
+- 40 new regression tests (76 total) covering the BOM TSV contract, noise
   boundaries, classification overrides, all new rules, the merge-flow fixes,
-  and screenshot page identity (schematic-dimensioned keys, page-local uid
-  collisions, page/component verification, legacy SVG viewBox identity).
-  新增 36 条回归测试（共 72 条），覆盖 BOM TSV 契约、噪声边界、分类覆盖、全部新规则、
-  合并流程修复与截图页身份（原理图维度页键、页内局部 uid 碰撞、页/器件校验、旧缓存 SVG viewBox 身份）。
+  screenshot page identity (schematic-dimensioned keys, page-local uid
+  collisions, page/component verification, legacy SVG viewBox identity), and
+  the CLI transport (detection, JSON envelope, session lifecycle, collection
+  over an injected executor).
+  新增 40 条回归测试（共 76 条），覆盖 BOM TSV 契约、噪声边界、分类覆盖、全部新规则、
+  合并流程修复、截图页身份（原理图维度页键、页内局部 uid 碰撞、页/器件校验、旧缓存 SVG
+  viewBox 身份）与 CLI 传输层（探测、JSON 信封、会话生命周期、注入执行器的完整采集）。
 
 ### Fixed / 修复
 

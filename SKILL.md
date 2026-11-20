@@ -5,8 +5,9 @@ description: >-
   evidence-based AI review, then produce a self-contained HTML report with annotated
   screenshots. Use when the user asks to 审查原理图、原理图评审、检查原理图、网表审查、
   schematic review, netlist review, or provides a .enet file. v1 does not support
-  Protel2 .net. Live mode requires the easyeda-api-skill Bridge; offline mode only
-  needs a .enet file.
+  Protel2 .net. Live mode uses the easyeda-api-skill Bridge; CLI mode opens a
+  local .eprj3 project through the EasyEDA Pro desktop client's built-in CLI;
+  offline mode only needs a .enet file.
 metadata:
   version: "1.0.0"
 ---
@@ -31,10 +32,25 @@ netlist review, or provides an `.enet` file. If the user provides a `.net`
 
 ## Quick start
 
-Before running, **ask the user where the report should be written** and pass that
-path as `--out <dir>`. Only fall back to `tmp/schematic-review/<runId>` when the
-user says any location is fine. Never write into the EasyEDA project directory
-unless the user explicitly asks and accepts the risk.
+Before running, ask the user **two** things (quick, one message is fine):
+
+1. **Which connection mode to use** — unless the user already specified it:
+
+   | Mode | Ask when | Requirement |
+   | --- | --- | --- |
+   | Bridge (`--source live`) | The project is open in a running EasyEDA editor | `easyeda-api-skill` Bridge + `run-api-gateway.eext` loaded |
+   | CLI (`--source cli`) | The user has a local/offline project file | Desktop client v4.1.70+ (built-in CLI) + the `.eprj3` path |
+
+   If the user directly provides an exported `.enet` file, skip the question and
+   use `--source file`. **Never guess the mode or a project path** — if the
+   request is just “审查当前原理图 / review this schematic” without context, ask
+   which mode and, for CLI mode, for the absolute `.eprj3` path. When both
+   desktop editions (`lceda-pro` / `easyeda-pro`) are installed, also ask which
+   one to drive.
+2. **Where the report should be written** — pass it as `--out <dir>`. Only fall
+   back to `tmp/schematic-review/<runId>` when the user says any location is
+   fine. Never write into the EasyEDA project directory unless the user
+   explicitly asks and accepts the risk.
 
 From the project root, replace `$SKILL_DIR` with this skill's directory
 (e.g. `D:\tempfile\test-skill\easyeda-schematic-review`):
@@ -42,6 +58,10 @@ From the project root, replace `$SKILL_DIR` with this skill's directory
 ```bash
 # Live review, default standard mode (rules + AI, pauses for packets)
 node "$SKILL_DIR/scripts/review.mjs" run --source live --out <user-chosen-dir>
+
+# CLI mode: local .eprj3 project through the desktop client (no Bridge).
+# Ask the user for the project path first; never guess it.
+node "$SKILL_DIR/scripts/review.mjs" run --source cli --project "C:/path/MyBoard.eprj3" --out <user-chosen-dir>
 
 # Fast rules-only review, one command
 node "$SKILL_DIR/scripts/review.mjs" run --source live --mode quick --out <user-chosen-dir>
@@ -55,6 +75,30 @@ node "$SKILL_DIR/scripts/review.mjs" run --resume --out <runDir>
 
 Reports are written to `<runDir>/report.html`. Only use the default
 `tmp/schematic-review/<runId>` location when the user delegated the choice.
+
+## CLI mode (local .eprj3 project)
+
+`--source cli` reviews a local project through the EasyEDA Pro / 嘉立创EDA专业版
+desktop client's built-in CLI (v4.1.70+), with no Bridge and no gateway extension.
+Pick it when the user chose CLI mode in the Quick start question above, or when
+they point to a local project file.
+
+1. **Ask the user for the absolute path of their local project** (`.eprj3`). Never
+   guess or scan for it. If they give a project folder, use the `.eprj3` file inside.
+2. Run `run --source cli --project <path> --out <dir>`. The skill opens the project
+   in a headless editor session, collects everything through the CLI's `invoke`
+   API, and closes the session it created when done (even on failure).
+3. **Never parse or write the `.eprj3` file format yourself.** Project data
+   (netlist, BOM, DRC, pins, page SVGs, geometry) always comes from the read-only
+   editor APIs, exactly like Bridge mode.
+4. The CLI is auto-detected (`lceda-pro` / `easyeda-pro` on PATH or standard
+   install locations); override with `--cli <exe>`. If both editions are installed,
+   ask the user which one to drive. `--cli-show` opens a visible window instead of
+   headless.
+5. Opening the project may upgrade its file format to the current client version
+   (`.eprj3` folder projects are two-way synced). Tell the user; recommend a
+   backup if the project is precious. The review never writes to the project
+   directory — all outputs go to the run directory.
 
 ## Standard-mode workflow (AI review)
 
@@ -103,7 +147,10 @@ See `references/ai-prompts.md` for the exact output schema and prompt template.
 
 | Flag | Scope | Meaning |
 | --- | --- | --- |
-| `--source live\|file` | run/collect | live uses Bridge; file uses `.enet` |
+| `--source live\|cli\|file` | run/collect | live = Bridge; cli = desktop-client CLI on a local `.eprj3`; file = `.enet` |
+| `--project <file>` | cli collect/run | Absolute path of the local `.eprj3` — ask the user, never guess |
+| `--cli <exe>` | cli | CLI executable override (auto-detects `lceda-pro` / `easyeda-pro`) |
+| `--cli-show` | cli | Show the editor window (default: headless) |
 | `--mode quick\|standard\|strict` | run/lint | quick = deterministic rules only; standard = v1 rules + AI; strict adds strict-only heuristics |
 | `--netlist <file>` | file collect | `.enet` path |
 | `--bom <file>` / `--drc <file>` | file collect | optional inputs |
@@ -134,9 +181,20 @@ the highest wins: 10 > 6 > 5 > 4 > 3 > 2 > 1 > 0.
 
 ## Live mode prerequisites
 
+Bridge mode (`--source live`):
+
 - EasyEDA Pro with `run-api-gateway.eext` loaded.
 - `easyeda-api-skill` Bridge running (`node <easyeda-api-skill>/scripts/bridge-server.mjs`).
 - The target project and schematic page open in EasyEDA.
+
+CLI mode (`--source cli`):
+
+- EasyEDA Pro / 嘉立创EDA专业版 desktop client v4.1.70+ (its `--help` header shows
+  the version; the installed client is the source of truth for CLI options).
+- A local `.eprj3` project path provided by the user.
+- No Bridge and no gateway extension needed; the skill opens and closes the
+  editor session itself. Sessions it creates are always closed
+  (`session close --destroy`); never close or abort a user-owned session.
 
 Scan ports 49620–49629 for `/health` with `service: "easyeda-bridge"`. Do not
 silently spawn background processes; only `--start-bridge` after the user agrees.

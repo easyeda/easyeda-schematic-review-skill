@@ -6,12 +6,12 @@
 | --- | --- |
 | 产品名 | `easyeda-schematic-review` |
 | 中文名 | 嘉立创EDA 原理图审查 |
-| 文档版本 | 0.13（截图页身份修复：页键带原理图维度、choosePage 证据校验、缓存 SVG 身份校验） |
+| 文档版本 | 0.14（CLI 模式：经桌面客户端内置 CLI 打开本地 .eprj3 工程取数，与桥接模式共用采集代码，不解析工程文件格式） |
 | 日期 | 2026-11-20 |
 | 状态 | 已定稿（Frozen），作为 v1.0.0 实现基线 |
 | 形态 | 标准 Claude Code Skill（`SKILL.md` + `scripts/` + `references/` + `assets/`） |
 | 报告形态 | **HTML 主报告**（可离线打开、带异常位置截图）+ JSON 机读报告 |
-| 运行依赖 | 实时模式：`easyeda-api-skill` 的 Bridge 服务 + `run-api-gateway.eext`；离线模式：无 |
+| 运行依赖 | 实时模式：`easyeda-api-skill` 的 Bridge 服务 + `run-api-gateway.eext`；CLI 模式：EasyEDA Pro / 嘉立创EDA专业版桌面客户端（含 CLI，≥ 4.1.70）与本地 `.eprj3` 工程；离线模式：无 |
 | 参考来源 | 仅参考 `easyeda-api-skill`（Bridge、API 参考、格式文档），不复制其他项目 skill 的实现 |
 
 ### 0.1 变更历史
@@ -31,6 +31,7 @@
 | 0.11 | 规则补全：新增 R040~R045（孤立地、UART 交叉、输入电容、光耦限流、总线终端、SWD 对）；修复 R016 DNP open question 死代码、R012 有源振荡器误报、R009 序号网络漏检、R014 +/- 后缀、0Ω 值归一化、R002 NC 后缀、R033/R034/R036 多引脚、R006 输出脚降级、R018 false/false 组合；BOM/PCB 标志缺失默认 yes |
 | 0.12 | 外部评审落地：新增 R046~R056/R058/R060（复位固定电平、电源输出并联、USB-C CC、内核储能电容、料号多值、电源跳线、VREF 去耦、去耦数量、数据线 ESD、跨域直连、LED 电流估算、晶振引到排针、自动网络名）；R057 预留（需器件库）、R059 实现为 open question；修复 BOM TSV 解析（嘉立创导出实为制表符分隔）、R020 端口名/短名/互补对豁免、U 前缀分类覆盖（HDR/SIP/AMS1117）、复合引脚名分段、R007 引脚名电源证据与跳线穿越、R010 RES 扩展、R016 BOM 有值降 P3、R023 提升到 standard；合并流程：单共享网络不再判重、findingKey 稳定增强、严重度只升不降、截断保护 AI 结论并优先砍噪声 |
 | 0.13 | 截图页身份修复：页键带原理图维度（保留中文、碰撞加 UUID 后缀），逐页 SVG 不再互相覆盖；`comp.page`/`location.pages`/packets 写唯一“原理图 / 图页”标签与 `pageKey`；choosePage 裁剪前校验 uid 存在性与位号一致性（EasyEDA 图元 uid 为页内局部，跨页同 uid 是不同器件），全部不匹配输出占位；capture 用 collect 记录的 `svgViewBox` 校验缓存 SVG 身份，拒绝裁剪被覆盖的旧缓存；scope `page:` 兼容裸页名/页键且忽略大小写 |
+| 0.14 | CLI 模式：`--source cli --project <本地工程.eprj3>` 经桌面客户端内置 CLI（lceda-pro/easyeda-pro ≥ 4.1.70）`open --path` 建会话、`invoke --session --ext-uuid eda` 执行与桥接模式相同的只读采集代码、`session close --destroy` 收尾；`--cli` 指定可执行文件、`--cli-show` 显示窗口；**不解析 .eprj3 文件格式**，工程数据一律经 editor API 读取；传输层可注入执行器（自动化测试不依赖真实 EDA）；打开工程可能触发客户端文件格式升级，需提示备份 |
 
 ## 目录
 
@@ -367,6 +368,20 @@
     - DRC 返回的 `primitiveId` 也批量取 BBox，写入 `drcPrimitives`；
     - 1000 器件目标：geometry 采集 < 15s（live collect 总时长另计）；
     - **DRC primitiveId → BBox 链路尚未实测**，列入风险表；失败时该 DRC finding 降级为无截图。
+
+#### CLI 模式（本地 .eprj3 工程）
+
+`--source cli --project <本地工程.eprj3>` 通过桌面客户端内置 CLI 取数，不需要 Bridge 与 `run-api-gateway.eext`。工程数据**一律经 editor API 读取，不解析 `.eprj3` 文件格式**：
+
+1. **探测 CLI**：`--cli <exe>` > 环境变量 `SCHEMATIC_REVIEW_CLI` > PATH 上的 `lceda-pro` / `easyeda-pro` > 常见安装目录。以 `<exe> --help` 头部版本为准，要求 ≥ 4.1.70；两个发行版同时存在时让用户选择，不混用。所有命令返回 JSON 信封 `{ok, value, error}`，`ok:false` 一律视为失败。
+2. **打开工程**：`<exe> open --path <工程.eprj3> --headless true`，取 `value.sessionId`。默认 headless；`--cli-show` 显示编辑器窗口。
+3. **执行采集**：`<exe> invoke --session <id> --ext-uuid eda --code <async 函数体> --timeout <ms>`，代码与桥接模式完全相同（只读 `eda.dmt_*` / `eda.sch_*` / `eda.sys_*`）；`--ext-uuid eda` 授予文件读权限，显式 `return` 的 gateway 兼容写法同样适用。
+4. **关闭会话**：`<exe> session close --session <id> --destroy` 在 finally 中执行，关闭失败不掩盖主错误；**绝不关闭或中止用户自己的会话**。
+5. **产物落点**：全部写入运行目录，不写工程目录；工程文件在审查过程中不被修改（编辑器打开工程本身可能升级文件格式，见风险）。
+
+**风险**：打开旧版本工程可能被客户端升级文件格式（`.eprj3` 文件夹工程双向同步），文档与运行提示中建议用户备份；CLI/客户端版本漂移时以安装版本的 `--help` / `doc` 输出为准，不依赖记忆中的命令签名。
+
+**验收**：提供本地 `.eprj3` 与桌面客户端即可完成完整审查；未安装 CLI 时给出明确提示与替代方案（桥接/离线），不产生半成品；每次运行结束不残留会话窗口。
 
 #### 离线模式
 
@@ -808,6 +823,11 @@ node scripts/review.mjs collect --source file --netlist design.enet [--bom bom.c
   "runId": "2026-11-12-153045",
   "runAt": "2026-11-12T15:30:00+08:00",
   "source": "live",
+  "transport": "bridge",
+  "projectPath": null,
+  "cliPath": null,
+  "cliVersion": null,
+  "sessionId": null,
   "mode": "standard",
   "noAi": false,
   "status": "done",
@@ -877,6 +897,7 @@ node scripts/review.mjs collect --source file --netlist design.enet [--bom bom.c
 - `model`：由 Claude 会话写入 `review-context.json`，或读取环境变量 `SCHEMATIC_REVIEW_MODEL`；都没有时写 `unknown`，不阻断流程；
 - `source` / `mode` / `noAi` / `status`：来自本次运行参数与阶段；`status` 取值 `collected|awaiting_ai|merged|captured|done`；
 - `windowId`：多窗口时用户选择的 EDA 窗口；单窗口时自动记录；
+- `transport`：`bridge`（实时模式）/ `cli`（CLI 模式）/ `file`（离线）；CLI 模式另记 `projectPath`、`cliPath`、`cliVersion`、`sessionId`；
 - `promptVersion`：`references/ai-prompts.md` 的版本号；
 - `coverage.skippedRules` / `suppressedFindings`：跳过/抑制的规则记录；
 - `coverage.componentPercent` / `netPercent`：分母为全板总数；`scopeComponentPercent` / `scopeNetPercent`：分母为 scope 内数量；
@@ -987,7 +1008,7 @@ metadata:
 7. “不要直接读原始 `.enet`，先运行 `scripts/review.mjs collect`”的硬性指令；
 8. “截图必须由 `capture` 脚本按 BBox 生成，不要手动画框/猜测坐标”的硬性指令；
 9. “AI 必须逐包审查、逐包写入 `findings.ai.<fileKey>.json`；中断时用 merge 生成部分报告”的编排指令；
-10. 参数语义：`--source live|file` 是运行模式；`--mode quick|standard|strict` 是规则/AI 深度，二者不可混用；
+10. 参数语义：`--source live|cli|file` 是运行模式；`--mode quick|standard|strict` 是规则/AI 深度，二者不可混用。CLI 模式必须先向用户拿到本地 `.eprj3` 路径，不得猜测，也不得自行解析工程文件；
 11. quick/no_ai 隐私约束：会话只运行脚本、只转述退出码与 P0~P3 计数，不读取 `model.json` / `lint.json` / 报告内容；用户要求查看细节时先说明数据会进入会话；
 12. `awaiting_ai` 处理：读取 `packets/progress.json`，逐包一进一出；写盘后丢弃该包细节，只保留 ID/计数；接近上下文上限时停止读包并转 `merge --partial`。
 
@@ -2621,7 +2642,7 @@ node scripts/review.mjs report \
 | --- | --- |
 | 0 | 成功 |
 | 1 | 通用/未预期错误（保留） |
-| 2 | 环境未就绪（Bridge/EDA/工程） |
+| 2 | 环境未就绪（Bridge/EDA/工程/CLI） |
 | 3 | 网表缺失或格式不支持 |
 | 4 | 关键数据解析失败 |
 | 5 | merge 自身失败，或**所有** AI 包均不合法（单包不合法只拒绝该包，不退出 5） |
@@ -2693,7 +2714,7 @@ node scripts/review.mjs report \
 | AC-21 | 分类可解释 | 每条依赖分类的规则都有 `categoryBasis`；分类置信度不足时跳过并记录 |
 | AC-22 | DNP 数据 | 显式 DNP 属性可识别；仅有 `Add into BOM=false` 时只产生提示/open question，不产生 high-confidence finding |
 | AC-23 | 逐包/中断 | AI 逐包写入；中断后可生成 partial 报告并标注覆盖率 |
-| AC-24 | 参数语义 | `--source live\|file` 与 `--mode quick\|standard\|strict` 不混用；文档/CLI 一致 |
+| AC-24 | 参数语义 | `--source live\|cli\|file` 与 `--mode quick\|standard\|strict` 不混用；文档/CLI 一致；CLI 模式必须提供 `--project` 且不解析工程文件格式 |
 | AC-25 | BOM 一致性 | R026 能发现 BOM 位号缺失/多余/数量不一致 |
 | AC-26 | AI 质量金标 | golden set ≥3 个 fixture（NE555、多页、含 I2C/BOOT/晶振）、≥20 条人工标注；统计口径为“规则+AI 合并后”；同一 set 连续 3 次运行取中位数；2 人独立标注、分歧由第 3 人裁定；目标：P0 误报 = 0、P1 召回 ≥80%、P1 精度 ≥90%；P2/P3 不承诺 |
 | AC-27 | 参数覆盖 | `strict` / `focus` / `scope` / `--lang en` 各有至少一个 fixture 或 CLI 测试；quick 在 NE555 上 < 5s |
