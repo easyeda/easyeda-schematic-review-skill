@@ -1214,7 +1214,7 @@ test('cli transport opens a session, opens the first page, invokes with eda iden
   assert.equal(t.pageInfo.selectedBy, 'first');
   const openArgs = calls.find(a => a[0] === 'open');
   assert.ok(openArgs.includes('--path') && openArgs.includes('--headless'));
-  const value = t.execute('return 1 + 1', { timeoutMs: 5000 });
+  const value = await t.execute('return 1 + 1', { timeoutMs: 5000 });
   assert.equal(value.ran, 'return 1 + 1');
   const invokeArgs = calls.find(a => a[0] === 'invoke' && a.includes('return 1 + 1'));
   assert.deepEqual(invokeArgs.slice(0, 6), ['invoke', '--session', 'sess-1', '--ext-uuid', 'eda', '--code']);
@@ -1362,8 +1362,148 @@ test('cli mode --page selects a page by uuid or unique name, rejects ambiguity',
 test('cli mode fails clearly when the project has no schematic page', async () => {
   const fake = cliPageFake({ pages: [], schematics: [] });
   await assert.rejects(
-    openCliTransport({ projectPath: 'C:/proj/Empty.eprj3', executable: fake.exe, spawnFn: fake.spawnFn }),
+    openCliTransport({ projectPath: 'C:/proj/Empty.eprj3', executable: fake.exe, spawnFn: fake.spawnFn, readyPollMs: 2, readyTimeoutMs: 10 }),
     /没有可打开的原理图图页/,
   );
   fs.rmSync(fake.dir, { recursive: true, force: true });
+});test('merge: a distinct AI finding sharing only components is not swallowed', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sch-review-merge-'));
+  const model = buildModel(netlist({
+    a: comp('u1', 'U1', {}, [['7', 'GND', 'GND'], ['8', 'VCC', '3V3']]),
+    b: comp('u3', 'U3', {}, [['2', 'VBAT_S', 'VBAT_S'], ['3', 'VBAT', 'VBAT']]),
+  }));
+  writeJson(path.join(dir, 'model.json'), model);
+  // Rule says GND short; AI says the VBAT rail is broken. Both cite U1/U3,
+  // but they are different defects — the AI P0 must survive as its own entry.
+  writeJson(path.join(dir, 'lint.json'), {
+    findings: [{
+      id: 'F-001', ruleId: 'R029', messageKey: 'R029.title', params: { net: 'GND' },
+      severity: 'P0', confidence: 'high', category: 'power', source: 'rule',
+      evidence: [{ kind: 'pin', uid: 'u1', designator: 'U1', pin: '7', net: 'GND' }],
+      location: { pages: [], designators: ['U1', 'U3'], uids: ['u1', 'u3'], nets: ['GND'] },
+    }],
+    openQuestions: [], coverage: {},
+  });
+  ensureDir(path.join(dir, 'ai'));
+  writeJson(path.join(dir, 'ai', 'findings.ai.power.json'), {
+    findings: [{
+      id: 'AI-1', severity: 'P0', confidence: 'high', category: 'power', title: 'VBAT_S 与 VBAT 断链',
+      evidence: [
+        { kind: 'pin', uid: 'u3', designator: 'U3', pin: '2', net: 'VBAT_S' },
+        { kind: 'pin', uid: 'u3', designator: 'U3', pin: '3', net: 'VBAT' },
+      ],
+      location: { pages: [], designators: ['U1', 'U3'], uids: ['u1', 'u3'], nets: ['VBAT_S', 'VBAT'] },
+    }],
+  });
+  const result = mergeFindings({ outDir: dir, aiDir: path.join(dir, 'ai'), lang: 'zh' });
+  assert.ok(result.findings.some(f => f.ruleId === 'R029'));
+  const ai = result.findings.find(f => f.source === 'ai');
+  assert.ok(ai, 'AI P0 must remain an independent finding');
+  assert.equal(ai.severity, 'P0');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('merge: AI enhancements accumulate instead of overwriting', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sch-review-merge-'));
+  const model = buildModel(netlist({
+    a: comp('u1', 'U1', {}, [['1', 'VCC', '3V3'], ['2', 'GND', 'GND']]),
+  }));
+  writeJson(path.join(dir, 'model.json'), model);
+  writeJson(path.join(dir, 'lint.json'), {
+    findings: [{
+      id: 'F-001', ruleId: 'R008', findingKey: 'R008:testkey', messageKey: 'R008.title', params: {},
+      severity: 'P2', confidence: 'medium', category: 'power', source: 'rule',
+      evidence: [{ kind: 'pin', uid: 'u1', designator: 'U1', pin: '1', net: '3V3' }],
+      location: { pages: [], designators: ['U1'], uids: ['u1'], nets: ['3V3'] },
+    }],
+    openQuestions: [], coverage: {},
+  });
+  ensureDir(path.join(dir, 'ai'));
+  const enh = (id, title) => ({
+    id, severity: 'P2', confidence: 'medium', category: 'power', title,
+    enhancesRuleFindingId: 'R008:testkey',
+    evidence: [{ kind: 'pin', uid: 'u1', designator: 'U1', pin: '1', net: '3V3' }],
+    location: { pages: [], designators: ['U1'], uids: ['u1'], nets: ['3V3'] },
+  });
+  writeJson(path.join(dir, 'ai', 'findings.ai.power.json'), { findings: [enh('AI-1', 'first'), enh('AI-2', 'second')] });
+  const result = mergeFindings({ outDir: dir, aiDir: path.join(dir, 'ai'), lang: 'zh' });
+  const target = result.findings.find(f => f.ruleId === 'R008');
+  assert.equal(target.aiEnhancements.length, 2);
+  assert.equal(target.aiEnhancements[0].observation, 'first');
+  assert.equal(target.aiEnhancement.observation, 'first');
+  assert.equal(result.findings.filter(f => f.ruleId === 'R008').length, 1);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('merge: maxFindings Infinity and maxQuestions Infinity keep everything', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sch-review-merge-'));
+  const model = buildModel(loadNe555(), { source: { mode: 'file' } });
+  writeJson(path.join(dir, 'model.json'), model);
+  const findings = [];
+  for (let i = 0; i < 40; i++) {
+    findings.push({
+      id: `F-${String(i + 1).padStart(3, '0')}`, ruleId: 'R020', messageKey: 'R020.title',
+      params: { netA: `NA${i}`, netB: `NB${i}` }, severity: 'P3', confidence: 'low', category: 'readability',
+      evidence: [{ kind: 'net', net: `NA${i}`, pins: [] }],
+      location: { pages: [], designators: [], uids: [], nets: [`NA${i}`, `NB${i}`] },
+    });
+  }
+  const questions = [];
+  for (let i = 0; i < 20; i++) questions.push({ question: `Q${i}?`, related: [], why: '' });
+  writeJson(path.join(dir, 'lint.json'), { findings, openQuestions: questions, coverage: {} });
+  ensureDir(path.join(dir, 'ai'));
+  const full = mergeFindings({ outDir: dir, aiDir: path.join(dir, 'ai'), lang: 'zh', maxFindings: Infinity, maxQuestions: Infinity });
+  assert.equal(full.findings.length, 40);
+  assert.equal(full.coverage.omittedFindings, 0);
+  assert.equal(full.openQuestions.length, 20);
+  assert.equal(full.coverage.omittedQuestions, 0);
+  const capped = mergeFindings({ outDir: dir, aiDir: path.join(dir, 'ai'), lang: 'zh', maxFindings: 5 });
+  assert.equal(capped.openQuestions.length, 15);
+  assert.equal(capped.coverage.omittedQuestions, 5);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('cli mode waits for project loading before opening a page', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sch-review-test-'));
+  const exe = path.join(dir, 'fake-cli.exe');
+  fs.writeFileSync(exe, '', 'utf8');
+  let listCalls = 0;
+  const spawnFn = (candidate, args) => {
+    if (args[0] === '--help') return { status: 0, stdout: 'JLCEDA Pro 4.1.103\n' };
+    if (args[0] === 'open') return { status: 0, stdout: JSON.stringify({ ok: true, value: { sessionId: 's7' } }) };
+    if (args[0] === 'invoke') {
+      const code = args[args.indexOf('--code') + 1];
+      if (code.includes('getAllSchematicPagesInfo')) {
+        listCalls++;
+        const pages = listCalls >= 3 ? [{ uuid: 'pg1', name: 'P1', parentSchematicUuid: 's1' }] : [];
+        return { status: 0, stdout: JSON.stringify({ ok: true, value: { pages, schematics: [{ uuid: 's1', name: 'Schematic1' }], current: null } }) };
+      }
+      if (code.includes('openDocument')) {
+        return { status: 0, stdout: JSON.stringify({ ok: true, value: { ok: true, tabId: 'tab1', doc: { uuid: 'pg1' }, activated: true } }) };
+      }
+      return { status: 0, stdout: JSON.stringify({ ok: true, value: {} }) };
+    }
+    return { status: 0, stdout: JSON.stringify({ ok: true, value: { closed: true } }) };
+  };
+  const t = await openCliTransport({ projectPath: 'C:/proj/Board.eprj3', executable: exe, spawnFn, readyPollMs: 1, readyTimeoutMs: 500 });
+  assert.equal(listCalls, 3);
+  assert.equal(t.pageInfo.opened.uuid, 'pg1');
+
+  // Never ready -> explicit timeout error mentioning the project did not load.
+  let emptyLists = 0;
+  const neverReady = (candidate, args) => {
+    if (args[0] === '--help') return { status: 0, stdout: 'JLCEDA Pro 4.1.103\n' };
+    if (args[0] === 'open') return { status: 0, stdout: JSON.stringify({ ok: true, value: { sessionId: 's8' } }) };
+    if (args[0] === 'invoke') {
+      emptyLists++;
+      return { status: 0, stdout: JSON.stringify({ ok: true, value: { pages: [], schematics: [], current: null } }) };
+    }
+    return { status: 0, stdout: JSON.stringify({ ok: true, value: { closed: true } }) };
+  };
+  await assert.rejects(
+    openCliTransport({ projectPath: 'C:/proj/Board.eprj3', executable: exe, spawnFn: neverReady, readyPollMs: 2, readyTimeoutMs: 10 }),
+    /未加载完成|没有可打开/,
+  );
+  assert.ok(emptyLists >= 2);
+  fs.rmSync(dir, { recursive: true, force: true });
 });

@@ -6,7 +6,7 @@
 | --- | --- |
 | 产品名 | `easyeda-schematic-review` |
 | 中文名 | 嘉立创EDA 原理图审查 |
-| 文档版本 | 0.14（CLI 模式：经桌面客户端内置 CLI 打开本地 .eprj3 工程取数，与桥接模式共用采集代码，不解析工程文件格式） |
+| 文档版本 | 0.15（全量输出：--full 解除包/结论/截图/开放问题上限；合并判重与多增强修复；CLI 就绪轮询与可调超时） |
 | 日期 | 2026-11-20 |
 | 状态 | 已定稿（Frozen），作为 v1.0.0 实现基线 |
 | 形态 | 标准 Claude Code Skill（`SKILL.md` + `scripts/` + `references/` + `assets/`） |
@@ -32,6 +32,7 @@
 | 0.12 | 外部评审落地：新增 R046~R056/R058/R060（复位固定电平、电源输出并联、USB-C CC、内核储能电容、料号多值、电源跳线、VREF 去耦、去耦数量、数据线 ESD、跨域直连、LED 电流估算、晶振引到排针、自动网络名）；R057 预留（需器件库）、R059 实现为 open question；修复 BOM TSV 解析（嘉立创导出实为制表符分隔）、R020 端口名/短名/互补对豁免、U 前缀分类覆盖（HDR/SIP/AMS1117）、复合引脚名分段、R007 引脚名电源证据与跳线穿越、R010 RES 扩展、R016 BOM 有值降 P3、R023 提升到 standard；合并流程：单共享网络不再判重、findingKey 稳定增强、严重度只升不降、截断保护 AI 结论并优先砍噪声 |
 | 0.13 | 截图页身份修复：页键带原理图维度（保留中文、碰撞加 UUID 后缀），逐页 SVG 不再互相覆盖；`comp.page`/`location.pages`/packets 写唯一“原理图 / 图页”标签与 `pageKey`；choosePage 裁剪前校验 uid 存在性与位号一致性（EasyEDA 图元 uid 为页内局部，跨页同 uid 是不同器件），全部不匹配输出占位；capture 用 collect 记录的 `svgViewBox` 校验缓存 SVG 身份，拒绝裁剪被覆盖的旧缓存；scope `page:` 兼容裸页名/页键且忽略大小写 |
 | 0.14 | CLI 模式：`--source cli --project <本地工程.eprj3>` 经桌面客户端内置 CLI（lceda-pro/easyeda-pro ≥ 4.1.70）`open --path` 建会话、**取图页列表并通过 `openDocument` + `waitForDocumentReady` + `activateDocument` 打开并激活图页**（默认第一个，`--page` 指定）、`invoke --session --ext-uuid eda` 执行与桥接模式相同的只读采集代码、`session close --destroy` 收尾；`--cli` 指定可执行文件、`--cli-show` 显示窗口；**不解析 .eprj3 文件格式**，工程数据一律经 editor API 读取；传输层可注入执行器（自动化测试不依赖真实 EDA）；打开工程可能触发客户端文件格式升级，需提示备份 |
+| 0.15 | 全量输出与正确性修复：新增 `--full`（审查包/正式结论/截图/开放问题一律不限，未审完的 AI 包视为失败、退出 6）；`--invoke-timeout`；开放问题上限参数化（lint/merge 同步，`--full` 不限）；合并判重改为必须落在网络/引脚证据上（仅共享器件不再判重、不同 ruleId 永不合并、AI 严重度高于目标条目不吸收），AI 增强改为 `aiEnhancements[]` 全量累积；CLI 打开工程后轮询图页列表直到加载完成再开页，`execute` 改 async；新增 7 条回归测试（83 总计） |
 
 ## 目录
 
@@ -247,21 +248,27 @@
 | `mode` | `standard` | `quick`：确定性规则集（R001~R006、R014~R017、R026、R029），**不调用 AI**；`standard`：全部 v1 规则 + AI；`strict`：全部规则 + strict-only 启发式 + AI |
 | `no_ai` | `false` | 强制跳过 AI；`quick` 隐含为 `true`；用于隐私/离线场景 |
 | `focus` | `all` | `power` / `mcu` / `interface` / `analog` / `power-electronics` / `connector` / `all` |
-| `source` | `live` | CLI/脚本层：`live` / `file`；与 `mode` 无关 |
+| `source` | `live` | CLI/脚本层：`live`（Bridge）/ `cli`（桌面客户端 CLI + 本地 `.eprj3`）/ `file`（`.enet`）；与 `mode` 无关 |
+| `project` | — | CLI 模式的本地工程 `.eprj3` 路径；必须由用户提供，禁止猜测 |
+| `cli` / `cli_show` | 自动探测 / `false` | CLI 可执行文件（默认 lceda-pro / easyeda-pro）；`cli_show` 显示编辑器窗口（默认 headless） |
+| `page` | 第一个图页 | CLI 模式审查的图页（uuid 或唯一名称；跨原理图重名时必须用 uuid） |
+| `invoke_timeout` | 步骤内置值 | CLI 模式单次 `invoke` 超时（毫秒，上限 30 分钟）；慢机器/大工程可调大 |
+| `full` | `false` | 全量输出：审查包、正式结论、截图、开放问题一律不设上限，且未审完的 AI 包视为失败（等价 `--fail-partial`），防止“假完整”报告 |
 | `output` | `tmp/schematic-review/<timestamp>/` | `<timestamp>` 格式 `YYYY-MM-DD-HHmmss`（精确到秒，避免同分钟撞目录）；默认必须位于项目根目录 `tmp/` 下；不得写入 EDA 工程目录；显式 `--out` 也建议放在 `tmp/` 下 |
 | `bridge_url` | 自动扫描 | 可选，显式指定 Bridge 地址（如 `http://127.0.0.1:49620`）；未指定时扫描 49620-49629 |
 | `lang` | `zh` | `zh` / `en`；作用于 run/packets/report：AI 输出语言 + 报告渲染；规则 ID、`.enet` 字段、技术术语保留原文 |
-| `max_findings` | `30` | 正式 finding 上限；P0/P1 不受此限制 |
+| `max_findings` | `30` | 正式 finding 上限；`--full` 不限；P0/P1、AI 独立结论、带 AI 增强的条目不受此限制 |
+| `max_questions` | `15` | 开放问题上限（lint 与 merge 同一口径）；`--full` 不限；被截断数量写入 `coverage.omittedQuestions` |
 | `max_p0` | `null` | CI 阈值：P0 数超过该值返回退出码 10；`null` 表示不限制 |
 | `max_p1` | `null` | CI 阈值：P1 数超过该值返回退出码 10 |
 | `strict_exit` | `false` | 等价于 `max_p0=0`；CI 卡点用 |
-| `max_packets` | `20` | AI 审查包数量上限 |
+| `max_packets` | `20` | AI 审查包数量上限；`--full` 不限（大工程会生成数十个包） |
 | `packet_token_limit` | `8000` | 单包 token 上限 |
 | `packet_budget` | `120000` | AI 审查总输入 token 预算；与包数/单包上限独立 |
 | `pins` | `true`（live） | 是否采集 `pins.json`；`--no-pins` 关闭后 R002/R006 降级 |
 | `screenshots` | `true` | 是否生成异常位置截图 |
 | `image_format` | `svg` | `svg`（v1 默认，纯本地）/ `png`（v1.1 可选，需 Bridge） |
-| `max_screenshots` | `30` | 截图上限；P0/P1 优先 |
+| `max_screenshots` | `30` | 非 P0/P1 截图上限；`--full` 不限；P0/P1 始终豁免 |
 | `self_contained` | `false` | 只控制是否把截图 base64 内联；CSS/JS 始终内联 |
 | `map_pages` | `false` | 逐页建立 UID→图页映射；同时门控多页 SVG 导出/截图；会切换当前图页，结束后恢复 |
 
@@ -374,7 +381,7 @@
 `--source cli --project <本地工程.eprj3>` 通过桌面客户端内置 CLI 取数，不需要 Bridge 与 `run-api-gateway.eext`。工程数据**一律经 editor API 读取，不解析 `.eprj3` 文件格式**：
 
 1. **探测 CLI**：`--cli <exe>` > 环境变量 `SCHEMATIC_REVIEW_CLI` > PATH 上的 `lceda-pro` / `easyeda-pro` > 常见安装目录。以 `<exe> --help` 头部版本为准，要求 ≥ 4.1.70；两个发行版同时存在时让用户选择，不混用。所有命令返回 JSON 信封 `{ok, value, error}`，`ok:false` 一律视为失败。
-2. **打开工程**：`<exe> open --path <工程.eprj3> --headless true`，取 `value.sessionId`。默认 headless；`--cli-show` 显示编辑器窗口。
+2. **打开工程**：`<exe> open --path <工程.eprj3> --headless true`，取 `value.sessionId`。默认 headless；`--cli-show` 显示编辑器窗口。`open` 返回时工程可能尚未加载完成（实测 6–10s），打开图页前**轮询 `getAllSchematicPagesInfo()` 直到返回非空**（默认最多 60s、500ms 间隔），避免首个采集 invoke 超时。
 3. **打开图页**：`open` 后工程没有活动文档，而网表、DRC、图元遍历、区域查询只对**已打开并激活**的文档有效。先用 `eda.dmt_Schematic.getAllSchematicPagesInfo()` 取图页列表（每项含 `uuid`/`name`/`parentSchematicUuid`），默认打开**第一个图页**；`--page <uuid|名称>` 指定其他图页，页名跨原理图可重复，重名时必须用 uuid（报错时列出候选与 uuid）。`eda.dmt_EditorControl.openDocument(uuid)` 返回标签页 ID（`undefined` 视为失败），随后 `waitForDocumentReady(tabId, 60000)` 等待就绪（≥ 4.1.79；更早版本轮询 `getDocumentReadyState` / `getCurrentDocumentInfo`），当前文档不是目标图页时再 `activateDocument(tabId)`。`openedPage`、`pageSelection`、`pageList`、`schematicCount` 写入 `collect.json`；工程含多个原理图且未指定 `--page` 时记录 warning，提示可用 `--page` 切换。
 4. **执行采集**：`<exe> invoke --session <id> --ext-uuid eda --code <async 函数体> --timeout <ms>`，代码与桥接模式完全相同（只读 `eda.dmt_*` / `eda.sch_*` / `eda.sys_*`）；`--ext-uuid eda` 授予文件读权限，显式 `return` 的 gateway 兼容写法同样适用。
 5. **关闭会话**：`<exe> session close --session <id> --destroy` 在 finally 中执行，关闭失败不掩盖主错误；**绝不关闭或中止用户自己的会话**。
@@ -597,10 +604,11 @@ node scripts/review.mjs collect --source file --netlist design.enet [--bom bom.c
 3. **拒绝无证据 finding**。
 4. **去重**：
    - 首先按 `enhancesRuleFindingId` 关联到已有规则 finding：优先匹配 `findingKey`（跨阶段稳定），缺省时回退显示 `id`；
-   - 其次：同 `category` 且（`(uid,pin)` 集合 Jaccard ≥ 0.5，或共享 net/uid/pin/designator 证据合计 ≥ 2 处）才判重；**仅共享一个网络不足以判重**（同一电源轨上的不同问题，如 R007 无来源 vs AI 双输出并联，必须各自保留）；标题文本**不作为**去重键；
-   - 规则和 AI 重复时保留规则版本，并合并 AI 的解释；AI 严重度高于规则条目时**只升不降**；
+   - 其次：同 `category` 且判重证据必须落在**网络/引脚**上——`(uid,pin)` 集合 Jaccard ≥ 0.5 且至少共享 1 个 net/pin，或共享 net ≥ 1 且共享 pin/uid ≥ 1；**两条独立规则（ruleId 不同）永不合并**；**仅共享器件（uid/位号）不够判重**（AI 的“VBAT 断链”P0 与 R029 的“GND 短路”P0 都涉及 U1/U3，却是不同缺陷）；仅共享一个网络同样不够（R007 无来源 vs AI 双输出并联必须各自保留）；标题文本**不作为**去重键；
+   - 规则和 AI 重复时保留规则版本，并合并 AI 的解释；AI 严重度**高于**目标规则条目时视为两个不同问题，**不吸收、保留独立条目**（避免误吸收独立 P0）；严重度只升不降；
+   - 同一规则条目可被多条 AI 结论增强，全部按顺序保存在 `aiEnhancements[]`（`aiEnhancement` 仅保留第一条以兼容旧消费方），报告逐条展示，不再后写覆盖先写；
 5. **排序**：`P0 > P1 > P2 > P3`；同级别按 `confidence`（high > medium > low）和证据数量排序；重复位号时按 `uid` 稳定排序。
-6. **截断**：默认 30 条；P0/P1、AI 独立结论、带 AI 增强的条目**永不截断**；其余按噪声优先（R020/R026 先砍）、再 P3 后 P2 的顺序丢弃；被截断的数量按规则写入 `coverage.omittedByRule` 并在报告中注明。
+6. **截断**：默认 30 条；`--full` 不限；P0/P1、AI 独立结论、带 AI 增强的条目**永不截断**；其余按噪声优先（R020/R026 先砍）、再 P3 后 P2 的顺序丢弃；被截断的数量按规则写入 `coverage.omittedByRule` 并在报告中注明。开放问题默认最多 15 条（lint/merge 同一上限，`--full` 不限），截断数量写入 `coverage.omittedQuestions`。
 7. **来源标记**：
    - `source: "rule"`：确定性规则结果；R005 从 DRC 映射而来时仍算 `rule`，并带 `drcRule` 字段；
    - `source: "ai"`：AI 审查结果；
@@ -1848,8 +1856,9 @@ metadata:
 | `evidence.kind` 不在枚举内 | 拒绝 |
 | 无 `evidence` | 拒绝 |
 | `confidence: high` 但证据只是启发式 | 降为 medium |
-| 与规则 finding 重复 | 合并，保留规则级别 |
-| 超过 `max_findings` | 优先砍 R020/R026 噪声，再 P3 后 P2；P0/P1、AI 结论、AI 增强条目永不截断 |
+| 与规则 finding 重复 | 合并，保留规则级别；AI 严重度更高或 ruleId 不同则不合并，保留独立条目 |
+| 超过 `max_findings` | 优先砍 R020/R026 噪声，再 P3 后 P2；P0/P1、AI 结论、AI 增强条目永不截断；`--full` 不限 |
+| 超过 `max_questions` | 按收集顺序截断，截断数量写入 `coverage.omittedQuestions`；`--full` 不限 |
 | 引用未映射 DRC 项 | 拒绝写入 findings；只进附录 |
 
 > 脚本 `merge-findings.mjs` 是权威校验方；AI 的“自检”只是生成前过滤，不能覆盖脚本结论。
@@ -2637,6 +2646,8 @@ node scripts/review.mjs report \
   - `scopeComponentPercent` / `scopeNetPercent`：分母 = scope 内器件/网络数；
   - `coverage.scope`：本次 scope 表达式。
 
+**全量审查边界**：`--full` 保证 100% 器件/网络进入规则与 AI 审查包（不再因包数/条数/截图上限丢结论），但“100%”指覆盖范围而非“发现所有潜在缺陷”——数据手册定义、时序、ESD 等级、PCB 布局/EMC/热设计类问题只能进入 open questions（清单中的 `[M]`/`[L]` 项），规则层本身不做判定。
+
 **退出码**：
 
 | 码 | 含义 |
@@ -2723,6 +2734,8 @@ node scripts/review.mjs report \
 | AC-29 | Mock Bridge | `tests/mock-bridge/` 可驱动 live collect 的自动化回归，不依赖真实 EDA |
 | AC-30 | 离线 DRC 记账 | 无 `drc.json` 时 R005 跳过并写入 `coverage.skippedRules`，原因 `drc unavailable` |
 | AC-31 | 评审标记 | 三态 + 备注写入 localStorage；刷新保留；导出 Markdown 含 ID/级别/标题/状态/备注 |
+| AC-32 | 全量输出 | `--full` 下 40+ P3 findings、20+ open questions、全部审查包与截图均保留（omitted 为 0）；存在未审完的 AI 包时退出 6；不带 `--full` 时各项上限仍生效 |
+| AC-33 | 合并正确性 | 仅共享器件的独立 AI P0 不被规则条目吸收；不同 ruleId 不合并；同一规则条目的多条 AI 增强全部保留（`aiEnhancements[]`） |
 | AC-32 | CI 阈值 | `--max-p0 0 --max-p1 3` 可配置；超阈值返回 10；`--strict-exit` 等价 `--max-p0 0` |
 | AC-33 | 零 finding 报告 | 全板 0 finding 时仪表盘/覆盖率正常，Top 3 显示“未发现 P0/P1”，不出现空白页 |
 | AC-34 | 规则抑制 | R006 > R015 > R011 > R027/R028 > R002；R005 > R004；抑制项计入 `suppressedFindings` |

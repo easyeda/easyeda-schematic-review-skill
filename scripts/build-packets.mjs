@@ -93,7 +93,9 @@ function checklistFor(id, components) {
   return [...new Set(cats.flatMap(c => CHECKLIST_BY_CATEGORY[c] || ["C-BOM"]))];
 }
 
-function makePacket(id, tier, subject, components, nets, lint, extraQuestions = []) {
+function makePacket(id, tier, subject, components, nets, lint, extraQuestions = [], limits = {}) {
+  const neighborLimit = limits.neighborLimit ?? 20;
+  const questionLimit = limits.questionLimit ?? 10;
   const uids = new Set(components.map(c => c.uid));
   const designators = new Set(components.map(c => c.designator));
   const netNames = new Set(nets.map(n => n.name));
@@ -117,9 +119,9 @@ function makePacket(id, tier, subject, components, nets, lint, extraQuestions = 
     tier,
     subject,
     facts,
-    neighbors: dedupeBy(neighbors, n => n.name).slice(0, 20),
+    neighbors: dedupeBy(neighbors, n => n.name).slice(0, neighborLimit),
     existingRuleFindings: relatedFindings(lint, uids, netNames, designators),
-    questions: [...new Set([...relatedQuestions(lint, uids, netNames, designators), ...extraQuestions])].slice(0, 10),
+    questions: [...new Set([...relatedQuestions(lint, uids, netNames, designators), ...extraQuestions])].slice(0, questionLimit),
     checklist: { domains: checklistDomains, file: "references/review-checklist.md" },
     estimated_tokens: 0,
   };
@@ -132,7 +134,7 @@ function dedupeBy(arr, keyFn) {
   return arr.filter(x => { const k = keyFn(x); if (seen.has(k)) return false; seen.add(k); return true; });
 }
 
-function interfacePackets(model, lint) {
+function interfacePackets(model, lint, limits = {}) {
   const packets = [];
   const patterns = [
     { id: 'interface:I2C', subject: 'I2C 总线', re: /(^|[_-])(SCL|SDA)([_-]|\d*$)/i },
@@ -146,33 +148,34 @@ function interfacePackets(model, lint) {
     if (!nets.length) continue;
     const uids = new Set(nets.flatMap(n => n.pins.map(p => p.uid)));
     const comps = model.components.filter(c => uids.has(c.uid));
-    packets.push(makePacket(pat.id, 'T1', pat.subject, comps, nets, lint));
+    packets.push(makePacket(pat.id, 'T1', pat.subject, comps, nets, lint, [], limits));
   }
   return packets;
 }
 
 export function buildPackets(model, lint, options = {}) {
   const maxPackets = options.maxPackets ?? 20;
+  const limits = { neighborLimit: options.neighborLimit, questionLimit: options.questionLimit };
   const packets = [];
 
   const powerNets = model.nets.filter(n => n.isPower || n.isGround);
   const powerUids = new Set(powerNets.flatMap(n => n.pins.map(p => p.uid)));
   const powerComps = model.components.filter(c => powerUids.has(c.uid));
-  packets.push(makePacket('power', 'T0', '电源与地网络', powerComps, powerNets, lint));
+  packets.push(makePacket('power', 'T0', '电源与地网络', powerComps, powerNets, lint, [], limits));
 
   for (const c of model.components) {
     if (!COMPONENT_PACKET_CATEGORIES.has(c.category)) continue;
     if (c.category === 'connector' && c.pins.length > 20) continue;
     const nets = model.nets.filter(n => c.pins.some(p => p.net === n.name));
-    packets.push(makePacket(`component:${c.designator || c.uid}`, 'T1', `${c.designator} ${c.category}`, [c], nets, lint));
+    packets.push(makePacket(`component:${c.designator || c.uid}`, 'T1', `${c.designator} ${c.category}`, [c], nets, lint, [], limits));
   }
 
-  packets.push(...interfacePackets(model, lint));
+  packets.push(...interfacePackets(model, lint, limits));
 
   const covered = new Set(packets.flatMap(p => p.facts.components.map(c => c.uid)));
   const rest = model.components.filter(c => !covered.has(c.uid));
   if (rest.length) {
-    packets.push(makePacket('passives', 'T2', '其余无源/辅助器件', rest, [], lint));
+    packets.push(makePacket('passives', 'T2', '其余无源/辅助器件', rest, [], lint, [], limits));
   }
 
   const tokenLimit = options.packetTokenLimit ?? 6000;
@@ -188,7 +191,7 @@ export function buildPackets(model, lint, options = {}) {
     for (let i = 0; i < uids.length; i += chunkSize) {
       const partNo = Math.floor(i / chunkSize) + 1;
       const comps = uids.slice(i, i + chunkSize).map(uid => byUid.get(uid));
-      splitPackets.push(makePacket(p.packet_id + '~' + partNo, p.tier, p.subject + ' #' + partNo, comps, nets, lint));
+      splitPackets.push(makePacket(p.packet_id + '~' + partNo, p.tier, p.subject + ' #' + partNo, comps, nets, lint, [], limits));
     }
   }
   const unique = dedupeBy(splitPackets, p => p.fileKey);

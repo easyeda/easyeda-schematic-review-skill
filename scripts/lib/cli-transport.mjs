@@ -218,7 +218,7 @@ function pageOptions(pages, schematicsById) {
  * any, else the first page of the project. Returns an executor compatible with
  * bridge.execute() plus `pageInfo`; call `close()` when done.
  */
-export async function openCliTransport({ projectPath, executable = null, headless = true, pageId = null, spawnFn = spawnSync, logger = null } = {}) {
+export async function openCliTransport({ projectPath, executable = null, headless = true, pageId = null, invokeTimeout = null, readyTimeoutMs = 60000, readyPollMs = 500, spawnFn = spawnSync, logger = null } = {}) {
   if (!projectPath) throw new Error('CLI 模式需要工程路径（.eprj3）');
   const found = detectCli({ explicit: executable, spawnFn, logger });
   if (!found) {
@@ -233,9 +233,20 @@ export async function openCliTransport({ projectPath, executable = null, headles
   }
   logger?.info?.('cli open project', { executable: found.executable, version: found.versionText, projectPath });
   const session = cliOpenProject(found.executable, projectPath, { headless, spawnFn });
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-  // Project opened — now locate a schematic page and make it active.
-  const state = cliInvoke(found.executable, session.sessionId, LIST_PAGES_CODE, { timeoutMs: 60000, spawnFn }) || {};
+  // `open` returns before the project tree has finished loading (~6–10 s on a
+  // real project). Poll until the page list is populated before opening a page,
+  // otherwise the first canvas invoke times out.
+  const deadline = Date.now() + (readyTimeoutMs ?? 60000);
+  let state = {};
+  for (;;) {
+    state = cliInvoke(found.executable, session.sessionId, LIST_PAGES_CODE, { timeoutMs: 60000, spawnFn }) || {};
+    if (Array.isArray(state.pages) && state.pages.length) break;
+    if (Date.now() >= deadline) break;
+    logger?.info?.('project not ready yet, waiting', { waitMs: readyPollMs ?? 500 });
+    await sleep(readyPollMs ?? 500);
+  }
   const schematicsById = new Map((state.schematics || []).map(s => [s.uuid || s.schematicUuid || s.id, s.name || null]));
   const pages = (state.pages || []).map(p => ({
     uuid: p.uuid || p.pageUuid || p.id || null,
@@ -244,7 +255,7 @@ export async function openCliTransport({ projectPath, executable = null, headles
     schematicName: p.parentSchematicUuid ? (schematicsById.get(p.parentSchematicUuid) || null) : null,
   })).filter(p => p.uuid);
   if (!pages.length) {
-    throw new Error(`工程中没有可打开的原理图图页：${projectPath}（无法读取网表/DRC）`);
+    throw new Error(`工程中没有可打开的原理图图页（或工程在 ${Math.round((readyTimeoutMs ?? 60000) / 1000)}s 内未加载完成）：${projectPath}（无法读取网表/DRC）`);
   }
   const currentId = state.current && (state.current.uuid || state.current.pageUuid || state.current.id) || null;
   let target = null;
@@ -306,7 +317,7 @@ export async function openCliTransport({ projectPath, executable = null, headles
       pages,
       schematics: [...schematicsById].map(([uuid, name]) => ({ uuid, name })),
     },
-    execute: (code, { timeoutMs = 120000 } = {}) => cliInvoke(found.executable, session.sessionId, code, { timeoutMs, spawnFn }),
+    execute: async (code, { timeoutMs = 120000 } = {}) => cliInvoke(found.executable, session.sessionId, code, { timeoutMs: invokeTimeout || timeoutMs, spawnFn }),
     close: () => cliCloseSession(found.executable, session.sessionId, { spawnFn }),
   };
 }

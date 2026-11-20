@@ -1384,11 +1384,13 @@ export function lintModel(model, options = {}) {
     f.findingKey = computeFindingKey(f);
   });
 
+  const maxQuestions = options.maxQuestions ?? 15;
+  const allQuestions = dedupeQuestions(openQuestions);
   const result = {
     schemaVersion: '1.0',
     mode,
     findings: finalFindings.map(stripInternal),
-    openQuestions: dedupeQuestions(openQuestions).slice(0, 15),
+    openQuestions: Number.isFinite(maxQuestions) ? allQuestions.slice(0, maxQuestions) : allQuestions,
     coverage: {
       skippedRules,
       suppressedFindings: suppressed,

@@ -196,6 +196,7 @@ async function openTransport(options, log) {
       executable: options.cli.executable || null,
       headless: options.cli.headless !== false,
       pageId: options.cli.pageId || null,
+      invokeTimeout: options.cli.invokeTimeout || null,
       logger: log,
     });
     return {

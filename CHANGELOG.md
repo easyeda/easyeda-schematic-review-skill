@@ -11,6 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added / 新增
 
+- `--full` and `--invoke-timeout`. `--full` removes every coverage cap (AI
+  packets, formal findings, screenshots, open questions) and treats incomplete
+  AI packets as a failure (exit 6), so a "complete" report cannot silently omit
+  parts of the design; the open-question cap is now a parameter shared by lint
+  and merge instead of a hardcoded 15. `--invoke-timeout` raises the per-invoke
+  budget for CLI mode on slow machines or large projects.
+  新增 `--full`（解除审查包/正式结论/截图/开放问题全部上限，未审完的 AI 包视为失败并退出 6，
+  防止“假完整”报告；开放问题上限由硬编码 15 改为 lint/merge 共享参数）与 `--invoke-timeout`
+  （CLI 模式单次 invoke 超时，慢机器/大工程可调大）。
 - CLI mode: `--source cli --project <local .eprj3>` reviews a local project
   through the EasyEDA Pro / JLCEDA Pro desktop client's built-in CLI (v4.1.70+).
   The skill opens the project in a session (`open --path`, headless by default;
@@ -63,19 +72,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   新增 6 条确定性规则（当时共 42 条）：R040 孤立地网络、R041 UART 同方向互连、
   R042 稳压器输入电容、R043 光耦输入限流、R044 CAN/RS-485 终端（strict）、
   R045 SWD 调试对完整性（strict）。
-- 43 new regression tests (79 total) covering the BOM TSV contract, noise
+- 47 new regression tests (83 total) covering the BOM TSV contract, noise
   boundaries, classification overrides, all new rules, the merge-flow fixes,
   screenshot page identity (schematic-dimensioned keys, page-local uid
-  collisions, page/component verification, legacy SVG viewBox identity), and
-  the CLI transport (detection, JSON envelope, session lifecycle, page
-  activation and `--page` selection, collection over an injected executor).
-  新增 43 条回归测试（共 79 条），覆盖 BOM TSV 契约、噪声边界、分类覆盖、全部新规则、
+  collisions, page/component verification, legacy SVG viewBox identity),
+  dedupe/enhancement correctness, unbounded `--full` limits, the CLI transport
+  (detection, JSON envelope, session lifecycle, page activation and `--page`
+  selection, project-load polling, collection over an injected executor).
+  新增 47 条回归测试（共 83 条），覆盖 BOM TSV 契约、噪声边界、分类覆盖、全部新规则、
   合并流程修复、截图页身份（原理图维度页键、页内局部 uid 碰撞、页/器件校验、旧缓存 SVG
-  viewBox 身份）与 CLI 传输层（探测、JSON 信封、会话生命周期、图页打开与 `--page`
-  选择、注入执行器的完整采集）。
+  viewBox 身份）、判重/增强正确性、`--full` 全量上限、CLI 传输层（探测、JSON 信封、
+  会话生命周期、图页打开与 `--page` 选择、工程加载轮询、注入执行器的完整采集）。
 
 ### Fixed / 修复
 
+- Merge correctness: deduplication now requires overlap on **nets or pins** —
+  sharing only components (uids/designators) no longer merges two findings, two
+  distinct rules (different `ruleId`) never merge, and an AI finding whose
+  severity is higher than the target rule entry is kept as an independent
+  finding instead of being absorbed. On a real board this had swallowed an
+  independent VBAT rail-break P0 into an R029 GND finding. Multiple AI
+  conclusions can now enhance the same rule finding: all of them are kept in
+  `aiEnhancements[]` (the report shows each one) instead of the last one
+  overwriting the previous.
+  合并正确性：判重必须落在网络/引脚证据上——仅共享器件不再判重、不同 ruleId 永不合并、
+  AI 严重度高于目标规则条目时保留独立条目（真实板卡上曾把独立的 VBAT 断链 P0 吞进 R029 的
+  GND 条目）；同一规则条目可被多条 AI 结论增强，全部保存在 `aiEnhancements[]`（报告逐条
+  展示），不再后写覆盖先写。
+- CLI mode: after `open` the project tree is still loading (~6–10 s on a real
+  project); the skill now polls the page list until it is populated before
+  opening a page, instead of letting the first collection invoke time out. The
+  transport `execute` is now async so callers can use `.catch()`.
+  CLI 模式：`open` 返回时工程树仍在加载（实测 6–10s），现在先轮询图页列表直到有页再打开
+  图页，避免首个采集 invoke 超时；传输层 `execute` 改为 async，调用方可以正常使用 `.catch()`。
 - Screenshot page identity: page keys now carry the schematic dimension
   (`page-<schematic>__<page>.svg`, Unicode names preserved, UUID suffix on
   collision), so two schematics' same-named pages no longer overwrite each

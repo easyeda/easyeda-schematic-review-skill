@@ -236,7 +236,9 @@ Add `--no-ai` to `standard`/`strict` to keep all rules but skip the AI step.
 | `--project <file>` | CLI mode: absolute path of the local `.eprj3` project (ask the user; never guessed) |
 | `--cli <exe>` | CLI mode: executable override; otherwise auto-detects `lceda-pro` / `easyeda-pro` |
 | `--cli-show` | CLI mode: show the editor window (default: headless) |
-| `--page <uuid\|名称>` | CLI mode: schematic page to review (default: first page); use the uuid when page names repeat across schematics |
+| `--page <uuid\|name>` | CLI mode: schematic page to review (default: first page); use the uuid when page names repeat across schematics |
+| `--invoke-timeout <ms>` | CLI mode: per-invoke timeout (defaults per step; max 30 min) |
+| `--full` | No caps on packets, findings, screenshots or open questions; incomplete AI packets fail the run (exit 6). “100%” = every component/net enters rules + AI review, not every possible defect |
 | `--netlist <file>` | Path to the `.enet` file (offline mode) |
 | `--bom <file>` | Optional BOM CSV for cross-checks |
 | `--drc <file>` | Optional DRC JSON exported from EasyEDA |
@@ -623,6 +625,8 @@ node "$SKILL_DIR/scripts/review.mjs" run \
 | `--cli <exe>` | CLI 模式：指定可执行文件；默认自动探测 `lceda-pro` / `easyeda-pro` |
 | `--cli-show` | CLI 模式：显示编辑器窗口（默认 headless 打开） |
 | `--page <uuid\|名称>` | CLI 模式：指定要审查的原理图图页（默认第一个图页）；页名跨原理图重复时请用 uuid |
+| `--invoke-timeout <ms>` | CLI 模式：单次 invoke 超时（默认按步骤内置值，最大 30 分钟） |
+| `--full` | 全量输出：审查包、结论、截图、开放问题一律不设上限；未审完的 AI 包视为失败（退出 6）。“100%”指每个器件/网络都进入规则 + AI 审查，而非发现所有潜在缺陷 |
 | `--netlist <file>` | 离线模式下的 `.enet` 路径 |
 | `--bom <file>` | 可选的 BOM CSV，用于一致性检查 |
 | `--drc <file>` | 可选的 DRC JSON |

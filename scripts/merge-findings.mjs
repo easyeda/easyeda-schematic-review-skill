@@ -16,16 +16,21 @@ function jaccard(a, b) {
 
 function areDuplicates(a, b) {
   if (a.category !== b.category) return false;
+  // 两条独立的规则结论永不合并（即使证据重叠），避免掩盖真实问题。
+  if (a.ruleId && b.ruleId && a.ruleId !== b.ruleId) return false;
   const ra = refsOf(a), rb = refsOf(b);
   const shared = (x, y) => [...x].filter(v => y.has(v)).length;
   const sharedNets = shared(ra.nets, rb.nets);
   const sharedUids = shared(ra.uids, rb.uids);
   const sharedPins = shared(ra.pins, rb.pins);
-  const sharedDesignators = shared(ra.designators, rb.designators);
   const pinScore = jaccard(new Set([...ra.uids, ...ra.pins]), new Set([...rb.uids, ...rb.pins]));
-  // 仅共享一个网络不足以判重：同一电源轨上的不同问题（如 R007 无来源 vs AI 双输出并联）
-  // 必须各自保留。要求引脚/器件高度重合，或至少两处共享证据。
-  return pinScore >= 0.5 || sharedNets + sharedUids + sharedPins + sharedDesignators >= 2;
+  // 判重必须落在网络/引脚证据上：仅共享器件（uid/位号）不够——AI 的“VBAT 断链”P0
+  // 与 R029 的“GND 短路”P0 都涉及 U1/U3，却是不同缺陷；仅共享一个网络同样不够
+  // （R007 无来源 vs AI 双输出并联，见现有回归测试）。
+  const evidenceOverlap = sharedNets >= 1 || sharedPins >= 1;
+  const strong = pinScore >= 0.5 && evidenceOverlap;
+  const medium = sharedNets >= 1 && (sharedPins >= 1 || sharedUids >= 1);
+  return strong || medium;
 }
 
 const SEV_ORDER = { P0: 0, P1: 1, P2: 2, P3: 3 };
@@ -33,6 +38,25 @@ const SEV_ORDER = { P0: 0, P1: 1, P2: 2, P3: 3 };
 /** AI 结论合并进规则条目时，严重度只升不降。 */
 function escalateSeverity(target, aiSeverity) {
   if ((SEV_ORDER[aiSeverity] ?? 9) < (SEV_ORDER[target.severity] ?? 9)) target.severity = aiSeverity;
+}
+
+/**
+ * 一条规则条目可被多条 AI 结论增强；全部保留在 aiEnhancements[] 中（报告逐条展示），
+ * aiEnhancement 仅保留第一条以兼容旧消费方。
+ */
+function addEnhancement(target, ai) {
+  const item = {
+    observation: ai.observation || ai.title || '',
+    impact: ai.impact || '',
+    suggestion: ai.suggestion || '',
+    confidence: ai.confidence || 'medium',
+    severity: ai.severity || null,
+    id: ai.id || null,
+    packetId: ai.packetId || null,
+  };
+  if (!Array.isArray(target.aiEnhancements)) target.aiEnhancements = [];
+  target.aiEnhancements.push(item);
+  target.aiEnhancement = target.aiEnhancements[0];
 }
 
 function validateEvidence(finding, model) {
@@ -214,28 +238,21 @@ export function mergeFindings(options = {}) {
       const target = final.find(f => f.findingKey && f.findingKey === ai.enhancesRuleFindingId) ||
         final.find(f => f.id === ai.enhancesRuleFindingId);
       if (target) {
-        target.aiEnhancement = {
-          observation: ai.observation || ai.title || '',
-          impact: ai.impact || '',
-          suggestion: ai.suggestion || '',
-          confidence: ai.confidence || 'medium',
-          severity: ai.severity,
-        };
+        addEnhancement(target, ai);
         escalateSeverity(target, ai.severity);
         continue;
       }
     }
     const dup = final.find(f => areDuplicates(f, ai));
     if (dup) {
-      dup.aiEnhancement = dup.aiEnhancement || {
-        observation: ai.observation || ai.title || '',
-        impact: ai.impact || '',
-        suggestion: ai.suggestion || '',
-        confidence: ai.confidence || 'medium',
-        severity: ai.severity,
-      };
-      escalateSeverity(dup, ai.severity);
-      continue;
+      // AI 结论比目标条目更严重时视为两个不同问题：保留独立条目，不吸收。
+      const aiRank = SEV_ORDER[ai.severity] ?? 9;
+      const dupRank = SEV_ORDER[dup.severity] ?? 9;
+      if (aiRank >= dupRank) {
+        addEnhancement(dup, ai);
+        escalateSeverity(dup, ai.severity);
+        continue;
+      }
     }
     ai.findingKey = computeFindingKey(ai);
     final.push(localizeFinding(ai, lang, messages));
@@ -246,7 +263,7 @@ export function mergeFindings(options = {}) {
   scoped.sort(sortBySeverity);
   const maxFindings = options.maxFindings ?? 30;
   // P0/P1、AI 独立结论、带 AI 增强的条目永不截断；截断优先砍 R020/R026 类噪声，再 P3 后 P2。
-  const isProtected = f => ['P0', 'P1'].includes(f.severity) || f.aiEnhancement || f.source === 'ai';
+  const isProtected = f => ['P0', 'P1'].includes(f.severity) || f.aiEnhancement || (f.aiEnhancements && f.aiEnhancements.length) || f.source === 'ai';
   const kept = scoped.filter(isProtected);
   const droppable = scoped.filter(f => !isProtected(f));
   const noiseRank = f => (['R020', 'R026'].includes(f.ruleId) ? 0 : f.severity === 'P3' ? 1 : 2);
@@ -278,7 +295,8 @@ export function mergeFindings(options = {}) {
   for (const q of lint.openQuestions || []) addQ(q);
   for (const q of aiOpenQuestions) addQ(q);
   for (const f of aiFindings) for (const q of f.open_questions || f.questions || []) addQ(q);
-  const openQuestions = questions.slice(0, 15);
+  const maxQuestions = options.maxQuestions ?? 15;
+  const openQuestions = Number.isFinite(maxQuestions) ? questions.slice(0, maxQuestions) : questions;
   const omittedQuestions = Math.max(0, questions.length - openQuestions.length);
 
   const packetsCoverage = coverageFromPackets(outDir, packetsManifest, model);

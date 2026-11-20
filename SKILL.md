@@ -88,8 +88,10 @@ they point to a local project file.
    in a headless editor session, collects everything through the CLI's `invoke`
    API, and closes the session it created when done (even on failure).
    After `open` the project has **no document open**, and netlist/DRC/primitive
-   APIs only work on an opened, active document: the skill lists the schematic
-   pages and opens one — the **first page by default**; pass `--page <uuid|name>`
+   APIs only work on an opened, active document: the skill first waits for the
+   project to finish loading (it polls the page list — a real project takes
+   several seconds), then opens a schematic page — the **first page by
+   default**; pass `--page <uuid|name>`
    to review another (page names may repeat across schematics — then use the
    uuid). `collect.json` records `openedPage` and `pageList`; when the project
    has several schematics a warning is logged — tell the user which schematic
@@ -158,6 +160,8 @@ See `references/ai-prompts.md` for the exact output schema and prompt template.
 | `--cli <exe>` | cli | CLI executable override (auto-detects `lceda-pro` / `easyeda-pro`) |
 | `--cli-show` | cli | Show the editor window (default: headless) |
 | `--page <uuid\|name>` | cli | Schematic page to review (default: first page). Use the uuid when page names repeat across schematics |
+| `--invoke-timeout <ms>` | cli | Per-invoke timeout for CLI mode (defaults per step; max 30 min). Raise it on slow machines or large projects |
+| `--full` | run/lint/packets/merge/capture | No caps on packets, findings, screenshots or open questions, and incomplete AI packets fail the run (exit 6) instead of producing a "fake complete" report |
 | `--mode quick\|standard\|strict` | run/lint | quick = deterministic rules only; standard = v1 rules + AI; strict adds strict-only heuristics |
 | `--netlist <file>` | file collect | `.enet` path |
 | `--bom <file>` / `--drc <file>` | file collect | optional inputs |

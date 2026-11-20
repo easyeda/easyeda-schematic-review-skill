@@ -186,7 +186,12 @@ function renderFinding(f, opts) {
         <p><span class="label">${escapeHtml(t(messages, 'report.observation'))}</span><br>${escapeHtml(f.observation || '')}</p>
         <p><span class="label">${escapeHtml(t(messages, 'report.impact'))}</span><br>${escapeHtml(f.impact || '')}</p>
         <p><span class="label">${escapeHtml(t(messages, 'report.suggestion'))}</span><br>${escapeHtml(f.suggestion || '')}</p>
-        ${f.aiEnhancement ? `<p><span class="label">AI</span><br>${escapeHtml(f.aiEnhancement.observation || '')}<br><span class="note">${escapeHtml(f.aiEnhancement.suggestion || '')}</span></p>` : ''}
+        ${(() => {
+          const enh = Array.isArray(f.aiEnhancements) && f.aiEnhancements.length
+            ? f.aiEnhancements
+            : (f.aiEnhancement ? [f.aiEnhancement] : []);
+          return enh.map(e => `<p><span class="label">AI</span><br>${escapeHtml(e.observation || '')}${e.impact ? `<br>${escapeHtml(e.impact)}` : ''}<br><span class="note">${escapeHtml(e.suggestion || '')}</span></p>`).join('');
+        })()}
         ${renderEvidenceTable(f, messages)}
         <div class="tags">${tags}</div>
       </div>

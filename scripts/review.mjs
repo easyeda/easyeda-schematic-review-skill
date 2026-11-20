@@ -42,6 +42,8 @@ function usage() {
   --cli <exe>           CLI 可执行文件（默认自动探测 lceda-pro / easyeda-pro）
   --cli-show            CLI 模式显示编辑器窗口（默认 headless 打开）
   --page <uuid|名称>    CLI 模式指定要审查的原理图图页（默认第一个图页）
+  --invoke-timeout <ms> CLI 模式单次 invoke 超时（默认按各步骤内置值，最大 30 分钟）
+  --full                全量输出：不限审查包/结论/截图/开放问题，未审完的 AI 包视为失败
   --bom <file>          BOM CSV
   --drc <file>          DRC JSON
   --scope <expr>        page:P1 / net:VCC / designator:U1 / category:power
@@ -119,6 +121,7 @@ function initManifest(outDir, opts, source) {
     source: opts.source,
     transport: opts.source === 'cli' ? 'cli' : (opts.source === 'live' ? 'bridge' : 'file'),
     projectPath: opts.project || null,
+    full: Boolean(opts.full),
     mode: opts.mode,
     noAi: opts.noAi,
     status: 'initialized',
@@ -197,6 +200,7 @@ async function doCollect(opts, outDir, log) {
           executable: opts.cliPath,
           headless: !opts.cliShow,
           pageId: opts.page,
+          invokeTimeout: opts.invokeTimeout,
         } : null,
       });
     } catch (err) {
@@ -268,7 +272,7 @@ async function doCollect(opts, outDir, log) {
 function doLint(opts, outDir, log) {
   const model = readJson(path.join(outDir, 'model.json'));
   const bomFile = fs.existsSync(path.join(outDir, 'bom.csv')) ? path.join(outDir, 'bom.csv') : null;
-  const lint = lintModel(model, { mode: opts.mode, bomFile, logger: log });
+  const lint = lintModel(model, { mode: opts.mode, bomFile, logger: log, maxQuestions: opts.maxQuestions });
   writeJson(path.join(outDir, 'lint.json'), lint);
   updateManifest(outDir, { status: 'linted', ruleCatalogVersion: '1.0', files: collectManifestFiles(outDir) });
   logLine(outDir, 'info', 'lint done', { findings: lint.findings.length, suppressed: lint.coverage.suppressedFindings });
@@ -279,7 +283,13 @@ function doPackets(opts, outDir, log) {
   ensureDir(path.join(outDir, 'ai'));
   const model = readJson(path.join(outDir, 'model.json'));
   const lint = readJson(path.join(outDir, 'lint.json'), { findings: [], openQuestions: [] });
-  const packets = buildPackets(model, lint, { maxPackets: opts.maxPackets, packetTokenLimit: opts.packetTokenLimit, focus: opts.focus });
+  const packets = buildPackets(model, lint, {
+    maxPackets: opts.maxPackets,
+    packetTokenLimit: opts.packetTokenLimit,
+    focus: opts.focus,
+    neighborLimit: opts.full ? Infinity : undefined,
+    questionLimit: opts.full ? Infinity : undefined,
+  });
   const manifest = writePackets(outDir, packets, { focus: opts.focus });
   updateManifest(outDir, { status: 'awaiting_ai', files: collectManifestFiles(outDir) });
   logLine(outDir, 'info', 'packets done', { count: manifest.count });
@@ -295,6 +305,7 @@ function doMerge(opts, outDir, log) {
     lang: opts.lang,
     scope: opts.scope,
     maxFindings: opts.maxFindings,
+    maxQuestions: opts.maxQuestions,
     mode: opts.mode,
     runId: opts.runId || path.basename(outDir),
     logger: log,
@@ -376,6 +387,7 @@ function normalizeOpts(argv) {
   const raw = parseArgs(argv);
   const mode = raw.mode || 'standard';
   if (!['quick', 'standard', 'strict'].includes(mode)) throw new CliError(`未知 --mode: ${mode}`, 1);
+  const full = Boolean(raw.full);
   const source = raw.source || (raw.netlist ? 'file' : (raw.project ? 'cli' : 'live'));
   if (!['live', 'cli', 'file'].includes(source)) throw new CliError(`未知 --source: ${source}`, 1);
   return {
@@ -405,12 +417,17 @@ function normalizeOpts(argv) {
     windowId: raw['window-id'] || null,
     noAi: Boolean(raw['no-ai']) || mode === 'quick',
     strictExit: Boolean(raw['strict-exit']),
-    failPartial: Boolean(raw['fail-partial']),
+    // --full：解除覆盖类上限（审查包/结论/截图/开放问题全部保留），
+    // 并把“未审完的 AI 包”视为失败，防止产出“假完整”报告。
+    full,
+    failPartial: Boolean(raw['fail-partial']) || full,
     maxP0: numArg(raw['max-p0'], null),
     maxP1: numArg(raw['max-p1'], null),
-    maxFindings: numArg(raw['max-findings'], 30),
-    maxScreenshots: numArg(raw['max-screenshots'], 30),
-    maxPackets: numArg(raw['max-packets'], 20),
+    maxFindings: raw['max-findings'] != null ? numArg(raw['max-findings'], 30) : (full ? Infinity : 30),
+    maxScreenshots: raw['max-screenshots'] != null ? numArg(raw['max-screenshots'], 30) : (full ? Infinity : 30),
+    maxPackets: raw['max-packets'] != null ? numArg(raw['max-packets'], 20) : (full ? Infinity : 20),
+    maxQuestions: full ? Infinity : 15,
+    invokeTimeout: numArg(raw['invoke-timeout'], null),
     resume: Boolean(raw.resume),
     model: raw.model || process.env.SCHEMATIC_REVIEW_MODEL || null,
     tokensIn: numArg(raw['tokens-in'], null),
