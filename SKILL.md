@@ -9,7 +9,7 @@ description: >-
   easyeda-api-skill Bridge; CLI mode opens a local .eprj3 project through the
   EasyEDA Pro desktop client's built-in CLI; offline mode only needs a .enet file.
 metadata:
-  version: "1.0.0"
+  version: "0.0.2"
 ---
 
 # EasyEDA Schematic Review
