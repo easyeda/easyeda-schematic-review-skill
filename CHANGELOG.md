@@ -9,8 +9,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added / 新增
+
+- Thirteen new deterministic rules from an external schematic-review post-mortem
+  (55 total, `R001`–`R060`): `R046` reset pin tied to a rail (P0 to GND / P1 to power),
+  `R047` paralleled power outputs on one rail, `R048` USB-C CC1/CC2 missing Rp/Rd,
+  `R049` MCU core-regulator pin (VCL/VCAP) missing storage cap, `R050` one supplier
+  part with conflicting values, `R051` power-select jumper without a default,
+  `R052` VREFH/VREFL decoupling, `R053` decoupling count per power pin (strict),
+  `R054` connector data-line ESD/TVS, `R055` cross-power-domain direct connection
+  (strict), `R056` LED current estimate outside 0.5–20 mA, `R058` crystal nets
+  routed to headers, `R060` auto-named connector nets (strict).
+  外部原理图评审复盘落地，新增 13 条确定性规则（共 55 条，R001–R060）：
+  R046 复位脚接死电平（接地 P0/接电源 P1）、R047 电源输出直接并联、R048 USB-C CC 缺 Rp/Rd、
+  R049 内核稳压脚（VCL/VCAP）缺储能电容、R050 同一料号多个值、R051 电源选择跳线无默认、
+  R052 VREFH/VREFL 去耦、R053 去耦数量核对（strict）、R054 连接器数据线 ESD、
+  R055 跨电源域直连（strict）、R056 LED 电流估算越界、R058 晶振节点引到排针、
+  R060 连接器自动网络名（strict）。
+  `R057` (LDO minimum output capacitance) is reserved for v1.1 — it needs a device
+  library; `R059` (SWD header pinout) is implemented as an open question because
+  there is no universal SWD pinout standard.
+  R057（LDO 最小输出电容）预留至 v1.1（需器件库）；R059（SWD 排针线序）因无统一标准，
+  实现为 open question 而非编号规则。
+- Six new deterministic rules (42 total at that point, `R001`–`R045`):
+  `R040` isolated ground nets, `R041` UART TX-TX/RX-RX wiring,
+  `R042` regulator input capacitor, `R043` optocoupler input series resistor,
+  `R044` CAN/RS-485 bus termination (strict), `R045` SWD pair completeness (strict).
+  新增 6 条确定性规则（当时共 42 条）：R040 孤立地网络、R041 UART 同方向互连、
+  R042 稳压器输入电容、R043 光耦输入限流、R044 CAN/RS-485 终端（strict）、
+  R045 SWD 调试对完整性（strict）。
+- 36 new regression tests (72 total) covering the BOM TSV contract, noise
+  boundaries, classification overrides, all new rules, the merge-flow fixes,
+  and screenshot page identity (schematic-dimensioned keys, page-local uid
+  collisions, page/component verification, legacy SVG viewBox identity).
+  新增 36 条回归测试（共 72 条），覆盖 BOM TSV 契约、噪声边界、分类覆盖、全部新规则、
+  合并流程修复与截图页身份（原理图维度页键、页内局部 uid 碰撞、页/器件校验、旧缓存 SVG viewBox 身份）。
+
 ### Fixed / 修复
 
+- Screenshot page identity: page keys now carry the schematic dimension
+  (`page-<schematic>__<page>.svg`, Unicode names preserved, UUID suffix on
+  collision), so two schematics' same-named pages no longer overwrite each
+  other's geometry entry and SVG; `comp.page` / `location.pages` / packet facts
+  carry unique `Schematic / Page` labels plus `pageKey` (a bare `P1` was
+  ambiguous). EasyEDA primitive uids are **page-local** — on a real
+  two-schematic board all 27 core uids collided with the baseboard page as
+  different parts — so page mapping and `choosePage` verify designator
+  agreement with the netlist before claiming a page, and capture verifies the
+  cached SVG's viewBox against the one recorded at collect time. Mismatches
+  produce placeholders (`截图不可用（页/器件不匹配）` / `（页面 SVG 与几何不匹配）`)
+  instead of wrong red boxes: the real board went from 35 wrong-page screenshots
+  to 0 wrong boxes (29/29 correct crops after re-collect). `scope page:P1` still
+  works (case-insensitive, bare page name or page key).
+  截图页身份修复：页键带原理图维度（`page-<原理图>__<图页>.svg`，保留中文名，碰撞加 UUID 后缀），
+  两个原理图的同名图页不再互相覆盖 geometry 与 SVG；comp.page / location.pages / packets 写唯一
+  “原理图 / 图页”标签与 pageKey（裸 P1 有歧义）。EasyEDA 图元 uid 是**页内局部的**——真实双原理图
+  板卡上核心板 27 个 uid 与底板页全部碰撞且位号不同——页映射与 choosePage 裁剪前校验位号与网表一致，
+  capture 还用 collect 记录的 viewBox 校验缓存 SVG 身份；不匹配一律占位
+  （截图不可用（页/器件不匹配）/（页面 SVG 与几何不匹配）），不画错框：真实板卡从 35 张错页截图
+  变为 0 张错框（重新采集后 29/29 正确裁剪）。scope page:P1 仍兼容（忽略大小写、裸页名或页键）。
+
+- `R016`: the DNP-candidate open question was unreachable (skipped by the
+  `addIntoBom` filter); it now fires for `Add into BOM=false` parts with empty values.
+  R016 的 DNP 候选 open question 原为死代码，现对 `Add into BOM=false` 且缺值器件正常产生。
+- Missing `Add into BOM`/`Convert to PCB` properties now default to `yes` (with a
+  model warning) instead of silently disabling R016/R017/R019.
+  BOM/PCB 标志属性缺失时默认按 yes 处理并记录 warning，不再整体静默跳过 R016/R017/R019。
+- `R012`: ground/power pads of 4-pad crystals no longer trigger missing-load-cap
+  findings; active oscillators (with a supply pin) are skipped entirely.
+  R012 不再对 4 脚晶振接地焊盘误报；带电源脚的有源振荡器整体跳过。
+- `R009` now matches numbered I2C nets with prefixes (`I2C_SCL0`, `MCU_SDA1`).
+  R009 支持带前缀和序号的 I2C 网络名。
+- `R014` name fallback also recognizes `+`/`-` suffix pairs (`USB_D+`/`USB_D-`).
+  R014 命名回退支持 +/- 后缀差分对。
+- Zero-ohm values `0R0`/`0.0`/`000` are recognized by R029 (rail shorts),
+  R035 (jumper exemption), and R008 (one-hop decoupling).
+  0Ω 识别覆盖 0R0/0.0/000 等写法（R029/R035/R008）。
+- `R002` treats `_NC`/`(NC)`/numbered NC pin-name variants as NC candidates per PRD.
+  R002 按 PRD 识别 `_NC`/`(NC)` 等 NC 引脚名变体。
+- `R006` downgrades floating optional power-output pins (`VOUT`/`VBUS`) to P1;
+  `R018` now reports the no-BOM/no-PCB-with-connections combination (P2).
+  R006 可选电源输出脚悬空降为 P1；R018 补齐 false/false 且有连接引脚的组合（P2）。
+- `R033`/`R034`/`R036` check every matching pin, not only the first one.
+  R033/R034/R036 逐一检查所有匹配引脚（多 EN/多路输出不再漏检）。
+- Placeholder value set now includes `N/C`/`DNP`/`DNI`; mechanical parts are
+  exempt from R016; R020 pre-filters net pairs by length for large designs.
+  占位符集合补充 N/C/DNP/DNI；机械件豁免 R016；R020 增加长度预过滤提升大设计性能。
 - Live collection works with run-api-gateway 4.1.105, which executes code as an
   `async function(eda){}` body: every execute payload now returns explicitly, and
   the synchronous `getEditorCurrentVersion()` is guarded with `try/catch`.
@@ -25,8 +109,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - The report header shows the review model, total duration, and token usage
   (exact when recorded in `review-context.json`, otherwise marked as estimated).
   报告头部展示审查模型、总用时与 Token 消耗（有精确值时直接展示，否则标注估算）。
+- `R026` BOM parsing: EasyEDA's `getBomFile('bom','csv')` actually exports **TSV**;
+  the comma-only parser mapped every column to index 0, producing ~106 noise
+  findings on a real board (wrong quantities, missing designators, part-number
+  mismatches — all one bug). The delimiter is now auto-detected from the header
+  line (`\t`/`,`/`;`), quoted-comma CSV still works, quantities >10000 become a
+  warning instead of a finding, and supplier-part comparison ignores case/whitespace.
+  R026 BOM 解析：嘉立创 `getBomFile('bom','csv')` 实际导出 TSV，原逗号解析器把所有列
+  映射到索引 0，真实板卡上产生约 106 条噪声（数量错、位号丢、料号不一致——同一个 bug）。
+  现按首行自动识别分隔符，带引号逗号 CSV 仍兼容；数量 >10000 只 warning；料号比较忽略大小写与空白。
+- `R020` no longer flags port-style auto names (`P000`/`P001`), names of length ≤3
+  (`DN`/`DP`), or intentional complementary pairs (`DP/DN`, `+/-`, `SCL/SDA`, …).
+  R020 不再误报端口式自动名（P000/P001）、长度 ≤3 短名（DN/DP）与互补后缀有意配对（DP/DN、+/-、SCL/SDA 等）。
+- Component classification: the generic `U` prefix no longer beats a specific
+  description — `U1` named `HDR-TH_12P` is a connector, `U11` named `AMS1117-3.3`
+  is a regulator (common JLC library parts). Added regulator part-number and
+  HDR/SIP/HEAD/TYPE-C description patterns, `AVCC`/`AVSS`/`VREF` pin classes, and
+  `/`-segment matching for composite pin names (`P010/VREFH0`, `P300/SWCLK`).
+  器件分类：通用 U 前缀不再压过具体描述——名为 HDR-TH_12P 的 U1 是连接器、名为
+  AMS1117-3.3 的 U11 是稳压器（嘉立创库常见件）；补充稳压器料号与 HDR/SIP/HEAD/TYPE-C
+  描述模式、AVCC/AVSS/VREF 引脚分类、复合引脚名（P010/VREFH0）按 / 分段匹配。
+- `R007` accepts pin-name power-output evidence (`VBUS`/`VOUT`/`V3` on ic-classified
+  parts such as CH330N/AMS1117) and traverses 2–3-pin power-select jumpers whose
+  pins all sit on power nets.
+  R007 认可引脚名电源输出证据（CH330N/AMS1117 等被分类为 ic 的 VBUS/VOUT/V3），
+  并允许穿越全电源网络的 2–3 脚电源选择跳线。
+- `R010` reset pin pattern extended to `RES`/`XRES`/`MCLR` (Renesas RA), skips
+  connectors/testpoints, and skips pins tied directly to rails (R046 owns those).
+  R010 复位引脚模式扩展 RES/XRES/MCLR（瑞萨 RA），跳过连接器/测试点，
+  直接 tied 到电源/地的引脚交由 R046。
+- `R005` (DRC dangling) now suppresses `R001` on the same net — one net, one finding.
+  R005（DRC 悬空）抑制同一网络的 R001，一个网络只报一条。
+- `R002`: floating Type-C `SBU1/SBU2` pins become an open question (usually
+  intentional in USB2.0 designs), not a defect.
+  R002：Type-C SBU1/SBU2 悬空转为 open question（USB2.0 设计通常故意不接），不报缺陷。
+- `R016` downgrades to P3/medium when the BOM already provides a valid value
+  (netlist annotation gap, not a missing parameter).
+  R016 在 BOM 已提供有效值时降为 P3/medium（网表标注不完整，而非缺参数）。
+- Merge flow: a single shared net no longer deduplicates distinct findings
+  (e.g. R007 "no source" vs an AI "paralleled outputs" finding on the same rail);
+  AI enhancements match the stable `findingKey` first (now emitted by lint and
+  carried in packets) instead of the drifting display id; merged severity only
+  escalates; `--max-findings` truncation never cuts P0/P1, AI conclusions, or
+  enhanced findings, drops R020/R026 noise first, and records per-rule omission
+  counts (`coverage.omittedByRule`) shown in the report.
+  合并流程：仅共享一个网络不再判重（同一电源轨上 R007 无来源 vs AI 双输出并联必须各自保留）；
+  AI 增强优先按稳定 findingKey 关联（lint 输出即分配、packets 携带），不再依赖会漂移的显示 id；
+  合并严重度只升不降；--max-findings 截断永不砍 P0/P1、AI 结论与增强条目，优先砍 R020/R026
+  噪声，并按规则记录省略数量（coverage.omittedByRule）在报告中注明。
 
 ### Changed / 变更
+
+- `R023` (power-entry protection) promoted from strict-only to standard — USB-powered
+  boards need the entry-protection check in a default review.
+  R023（电源入口保护）从 strict-only 提升到 standard——USB 供电板在默认评审下也需要入口保护检查。
+- Pin-level suppression order extended: `R046 > R048 > R006 > R015 > R011 >
+  R027/R028 > R034 > R036/R042 > R008 > R010 > R002`; net-level `R005 > R004 > R001`.
+  引脚级抑制顺序扩展：R046 > R048 > R006 > R015 > R011 > R027/R028 > R034 > R036/R042 > R008 > R010 > R002；
+  网络级 R005 > R004 > R001。
 
 - The agent asks the user for the report output directory (`--out`) before
   running a review.

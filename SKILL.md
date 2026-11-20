@@ -116,7 +116,7 @@ See `references/ai-prompts.md` for the exact output schema and prompt template.
 | `--map-pages` | collect | map components to pages and export per-page SVG; switches pages and restores |
 | `--no-screenshots` | run/capture | skip screenshots |
 | `--image-format svg\|png` | capture | SVG is default; PNG is a v1.1 optional path |
-| `--max-findings N` | merge | cap P2/P3; P0/P1 never truncated |
+| `--max-findings N` | merge | cap P2/P3 rule findings (R020/R026 noise first); P0/P1 and AI conclusions never truncated |
 | `--max-packets N` | packets | cap number of AI packets (default 20) |
 | `--packet-token-limit N` | packets | split oversized packets (default 6000 estimated tokens) |
 | `--max-screenshots N` | capture | cap P2/P3; P0/P1 never truncated |
@@ -150,6 +150,9 @@ If multiple EDA windows are connected, ask the user which one to use and pass
 - Findings show the schematic name and page name (`Schematic1 / P1`) whenever
   geometry is available; page names come from `getAllSchematicPagesInfo()` /
   `getAllSchematicsInfo()`, not from `getCurrentDocumentInfo()` (which has no name).
+  `location.pages` carries these unique labels (never a bare `P1`), and cached
+  page SVGs are keyed `page-<schematic>__<page>.svg` so same-named pages in
+  different schematics never overwrite each other.
 - The report header shows the review model, total duration (start of `run` to
   report generation), and token usage. Exact counts come from
   `review-context.json` / `--tokens-in/--tokens-out`; when absent they are
@@ -157,8 +160,13 @@ If multiple EDA windows are connected, ask the user which one to use and pass
   `run`, `report`, and `ai-done` update `review-context.json` automatically.
 - CSS/JS are always inlined; screenshots are SVG files by default.
 - Capture reads the cached `page-*.svg` and `model.geometry`; it does not call
-  EDA again. If geometry is missing, the finding shows a placeholder, never a
-  zero-size red box at the origin.
+  EDA again. Before cropping it verifies the page actually holds the finding's
+  evidence (EasyEDA primitive uids are page-local, so uid presence alone is not
+  enough — designators must agree with the netlist) and that the cached SVG's
+  viewBox matches the one recorded at collect time. Any mismatch shows a
+  placeholder (`截图不可用（页/器件不匹配）` / `（页面 SVG 与几何不匹配）`),
+  never a wrong red box; missing geometry also placeholders instead of drawing
+  a zero-size box at the origin.
 - Only P0/P1 and some P2 findings get screenshots; P0/P1 are exempt from the
   screenshot cap.
 - All report text is HTML-escaped; no external CDN, fonts, or network requests.
@@ -166,7 +174,7 @@ If multiple EDA windows are connected, ask the user which one to use and pass
 ## References
 
 - `references/netlist-format.md` — `.enet` structure and field mapping.
-- `references/review-checklist.md` — 按域的完整审查清单（约 280 项，含 `[D]` 规则 / `[A]` AI / `[M]` 数据手册 / `[L]` PCB 标记）。AI 逐包审查时按域选取，不要只依赖 R001~R035。
+- `references/review-checklist.md` — 按域的完整审查清单（约 280 项，含 `[D]` 规则 / `[A]` AI / `[M]` 数据手册 / `[L]` PCB 标记）。AI 逐包审查时按域选取，不要只依赖 R001~R060。
 - `references/rule-catalog.md` — rule IDs, severity, evidence, false-positive boundaries.
 - `references/ai-prompts.md` — packet prompt, output schema, evidence rules.
 - `references/drc-rules.md` — DRC rule name explanations.

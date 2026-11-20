@@ -2,24 +2,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  readJson, writeJson, sha256, stableHash, sortBySeverity, skillVersion, createLogger,
+  readJson, writeJson, sortBySeverity, skillVersion, createLogger,
+  refsOf, computeFindingKey,
 } from './lib/util.mjs';
 import { loadMessages, localizeFinding } from './lib/i18n.mjs';
-
-function refsOf(finding) {
-  const uids = new Set();
-  const pins = new Set();
-  const nets = new Set();
-  const designators = new Set();
-  for (const e of finding.evidence || []) {
-    if (e.uid) uids.add(e.uid);
-    if (e.designator) designators.add(e.designator);
-    if (e.kind === 'pin' && e.uid && e.pin) pins.add(`${e.uid}:${e.pin}`);
-    if (e.kind === 'net' && e.net) nets.add(e.net);
-    if (e.kind === 'drc' && e.name) nets.add(e.name);
-  }
-  return { uids, pins, nets, designators };
-}
 
 function jaccard(a, b) {
   if (!a.size && !b.size) return 0;
@@ -31,9 +17,22 @@ function jaccard(a, b) {
 function areDuplicates(a, b) {
   if (a.category !== b.category) return false;
   const ra = refsOf(a), rb = refsOf(b);
-  const netOverlap = [...ra.nets].some(n => rb.nets.has(n));
+  const shared = (x, y) => [...x].filter(v => y.has(v)).length;
+  const sharedNets = shared(ra.nets, rb.nets);
+  const sharedUids = shared(ra.uids, rb.uids);
+  const sharedPins = shared(ra.pins, rb.pins);
+  const sharedDesignators = shared(ra.designators, rb.designators);
   const pinScore = jaccard(new Set([...ra.uids, ...ra.pins]), new Set([...rb.uids, ...rb.pins]));
-  return netOverlap || pinScore >= 0.5;
+  // 仅共享一个网络不足以判重：同一电源轨上的不同问题（如 R007 无来源 vs AI 双输出并联）
+  // 必须各自保留。要求引脚/器件高度重合，或至少两处共享证据。
+  return pinScore >= 0.5 || sharedNets + sharedUids + sharedPins + sharedDesignators >= 2;
+}
+
+const SEV_ORDER = { P0: 0, P1: 1, P2: 2, P3: 3 };
+
+/** AI 结论合并进规则条目时，严重度只升不降。 */
+function escalateSeverity(target, aiSeverity) {
+  if ((SEV_ORDER[aiSeverity] ?? 9) < (SEV_ORDER[target.severity] ?? 9)) target.severity = aiSeverity;
 }
 
 function validateEvidence(finding, model) {
@@ -59,13 +58,6 @@ function validateEvidence(finding, model) {
   return errors;
 }
 
-function computeFindingKey(f) {
-  const refs = refsOf(f);
-  const keys = [...new Set([...refs.uids, ...refs.pins, ...refs.nets, ...refs.designators])].sort();
-  if (f.ruleId) return `${f.ruleId}:${stableHash(keys)}`;
-  return `${f.packetId || f.source || 'ai'}:${stableHash({ subject: f.subject || f.title, evidence: keys })}`;
-}
-
 function scopeMatches(finding, scope, model) {
   if (!scope) return true;
   const clauses = String(scope).split(',').map(s => s.trim()).filter(Boolean);
@@ -75,10 +67,19 @@ function scopeMatches(finding, scope, model) {
     const [k, ...rest] = clause.split(':');
     const v = rest.join(':');
     if (k === 'page') {
+      // location.pages / comp.page carry unique "Schematic / Page" labels;
+      // still accept a bare page name (page:P1) or an exact pageFileKey,
+      // case-insensitively per the scope contract.
+      const lv = String(v).toLowerCase();
+      const matchPage = (p) => {
+        if (!p) return false;
+        const lp = String(p).toLowerCase();
+        return lp === lv || lp.endsWith(` / ${lv}`);
+      };
       const pages = finding.location?.pages || [];
-      if (pages.length) return pages.includes(v);
+      if (pages.some(matchPage)) return true;
       const comps = model.components.filter(c => refs.uids.has(c.uid));
-      return comps.some(c => c.page === v);
+      return comps.some(c => matchPage(c.page) || (c.pageKey && String(c.pageKey).toLowerCase() === lv));
     }
     if (k === 'net') return refs.nets.has(v);
     if (k === 'designator') return refs.designators.has(v);
@@ -206,17 +207,21 @@ export function mergeFindings(options = {}) {
   for (const f of ruleFindings) f.findingKey = f.findingKey || computeFindingKey(f);
 
   // Enhancements: AI can attach to an existing rule finding instead of duplicating it.
+  // findingKey 优先于显示 id：显示 id 在 lint/merge 阶段会重新编号，findingKey 稳定。
   const final = [...ruleFindings];
   for (const ai of aiFindings) {
     if (ai.enhancesRuleFindingId) {
-      const target = final.find(f => f.id === ai.enhancesRuleFindingId || f.findingKey === ai.enhancesRuleFindingId);
+      const target = final.find(f => f.findingKey && f.findingKey === ai.enhancesRuleFindingId) ||
+        final.find(f => f.id === ai.enhancesRuleFindingId);
       if (target) {
         target.aiEnhancement = {
           observation: ai.observation || ai.title || '',
           impact: ai.impact || '',
           suggestion: ai.suggestion || '',
           confidence: ai.confidence || 'medium',
+          severity: ai.severity,
         };
+        escalateSeverity(target, ai.severity);
         continue;
       }
     }
@@ -227,7 +232,9 @@ export function mergeFindings(options = {}) {
         impact: ai.impact || '',
         suggestion: ai.suggestion || '',
         confidence: ai.confidence || 'medium',
+        severity: ai.severity,
       };
+      escalateSeverity(dup, ai.severity);
       continue;
     }
     ai.findingKey = computeFindingKey(ai);
@@ -238,12 +245,26 @@ export function mergeFindings(options = {}) {
   const scoped = final.filter(f => scopeMatches(f, scope, model));
   scoped.sort(sortBySeverity);
   const maxFindings = options.maxFindings ?? 30;
-  const kept = [];
+  // P0/P1、AI 独立结论、带 AI 增强的条目永不截断；截断优先砍 R020/R026 类噪声，再 P3 后 P2。
+  const isProtected = f => ['P0', 'P1'].includes(f.severity) || f.aiEnhancement || f.source === 'ai';
+  const kept = scoped.filter(isProtected);
+  const droppable = scoped.filter(f => !isProtected(f));
+  const noiseRank = f => (['R020', 'R026'].includes(f.ruleId) ? 0 : f.severity === 'P3' ? 1 : 2);
+  const dropOrder = [...droppable].sort((a, b) => noiseRank(a) - noiseRank(b) || sortBySeverity(b, a));
+  const budget = Math.max(0, maxFindings - kept.length);
+  const toDrop = new Set(dropOrder.slice(0, Math.max(0, droppable.length - budget)));
   let omitted = 0;
-  for (const f of scoped) {
-    if (kept.length >= maxFindings && !['P0', 'P1'].includes(f.severity)) { omitted++; continue; }
+  const omittedByRule = {};
+  for (const f of droppable) {
+    if (toDrop.has(f)) {
+      omitted++;
+      const k = f.ruleId || f.source || 'ai';
+      omittedByRule[k] = (omittedByRule[k] || 0) + 1;
+      continue;
+    }
     kept.push(f);
   }
+  kept.sort(sortBySeverity);
   kept.forEach((f, i) => { f.id = `F-${String(i + 1).padStart(3, '0')}`; f.findingKey = f.findingKey || computeFindingKey(f); });
 
   const questions = [];
@@ -275,6 +296,7 @@ export function mergeFindings(options = {}) {
       ? `AI 结果有 ${rejected.length} 条证据无效`
       : packetsCoverage.partial ? '部分 AI 包未完成' : null,
     omittedFindings: omitted,
+    omittedByRule,
     omittedQuestions,
     aiRejected: rejected,
   };

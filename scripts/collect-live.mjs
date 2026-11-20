@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  ensureDir, writeJson, writeText, sanitizeFileKey, createLogger,
+  ensureDir, writeJson, writeText, createLogger, pageLabelOf, pageFileKeyOf,
 } from './lib/util.mjs';
 import { findBridge, execute, resolveWindow, launchBridge, bridgeUnavailableMessage } from './bridge.mjs';
 
@@ -111,13 +111,6 @@ function pageCatalog(parts = {}) {
   return { pages: [...pages.values()], schematics };
 }
 
-function pageLabelOf(page) {
-  const pageName = page?.pageName || page?.name || null;
-  const schematicName = page?.schematicName || null;
-  if (schematicName && pageName) return `${schematicName} / ${pageName}`;
-  return pageName || schematicName || null;
-}
-
 async function collectCurrentPage(bridgeUrl, windowId, includeGeometry) {
   const code = `${COMPONENT_SNAPSHOT}
 return await (async () => {
@@ -198,7 +191,10 @@ export async function collectLive(options = {}) {
   const pageName = currentPageItem?.name || pageNameOf(doc);
   const schematicUuid = currentPageItem?.parentSchematicUuid || null;
   const schematicName = schematicUuid ? (catalog.schematics.get(schematicUuid) || null) : null;
-  const pageFileKey = sanitizeFileKey(pageName);
+  // Page keys carry the schematic dimension: two schematics can both have a
+  // page named "P1", and a name-only key would overwrite geometry + page SVG.
+  const usedPageKeys = new Set();
+  const pageFileKey = pageFileKeyOf(schematicName, pageName, docUuid, usedPageKeys);
   const pages = {};
   const current = {
     pageUuid: docUuid,
@@ -229,6 +225,7 @@ export async function collectLive(options = {}) {
     }
   }
   pages.__current__ = current;
+  pages[pageFileKey] = current;
 
   if (options.mapPages) {
     try {
@@ -249,13 +246,17 @@ export async function collectLive(options = {}) {
       }
       const originalUuid = current.pageUuid;
       for (const p of pageItems) {
+        const pUuid = p.uuid || p.pageUuid || p.id || null;
+        // The current page was already collected (with DRC/pins context);
+        // reuse it instead of switching away and back.
+        if (pUuid && pUuid === originalUuid && currentPageItem) continue;
         const pName = pageItemName(p) || 'Page';
         const pSchematicUuid = p.parentSchematicUuid || null;
         const pSchematicName = pSchematicUuid ? (catalog.schematics.get(pSchematicUuid) || null) : null;
-        const pKey = sanitizeFileKey(pName);
+        const pKey = pageFileKeyOf(pSchematicName, pName, pUuid, usedPageKeys);
         const snap = await collectPage(bridge.url, windowId, p, options.geometry !== false);
         const pg = {
-          pageUuid: p.uuid || p.pageUuid || p.id || null,
+          pageUuid: pUuid,
           pageName: pName,
           pageFileKey: pKey,
           schematicUuid: pSchematicUuid,

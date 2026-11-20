@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   readJson, writeJson, writeText, escapeHtml, sha256, skillVersion, fileEntry, ensureDir,
-  fmtDuration, estimateTokens, numArg,
+  fmtDuration, estimateTokens, numArg, pageLabelOf,
 } from './lib/util.mjs';
 import { loadMessages, t, localizeFinding } from './lib/i18n.mjs';
 
@@ -18,9 +18,14 @@ function pct(v) {
 function buildPageLabels(model) {
   const labels = new Map();
   for (const page of Object.values(model.geometry?.pages || {})) {
+    const label = pageLabelOf(page);
     const name = page?.pageName;
-    if (!name || labels.has(name)) continue;
-    labels.set(name, page.schematicName ? `${page.schematicName} / ${name}` : name);
+    if (name && !labels.has(name)) labels.set(name, label || name);
+    // location.pages now carries unique labels / schematic-dimensioned keys;
+    // index those too so duplicate page names across schematics stay distinct.
+    if (label && !labels.has(label)) labels.set(label, label);
+    const fileKey = page?.pageFileKey;
+    if (fileKey && !labels.has(fileKey)) labels.set(fileKey, label || fileKey);
   }
   const current = model.geometry?.currentPage;
   if (current && !labels.has(current)) {
@@ -220,12 +225,14 @@ function renderCoverage(data, messages) {
   const c = data.coverage || {};
   const partial = c.partial ? `<div class="partial">${escapeHtml(t(messages, 'report.partial', { reason: c.partialReason || 'AI 包未全部完成' }))}</div>` : '';
   const scope = c.scope ? `<div class="note">${escapeHtml(t(messages, 'report.scope'))}: ${escapeHtml(c.scope)}</div>` : '';
+  const omittedDetail = Object.entries(c.omittedByRule || {}).map(([k, n]) => `${k}: ${n}`).join(', ');
+  const omitted = c.omittedFindings ? `<div class="note">${escapeHtml(t(messages, 'report.omitted', { count: c.omittedFindings, detail: omittedDetail || '—' }))}</div>` : '';
   return `${partial}<div class="coverage">
     <div class="metric"><div class="label">${escapeHtml(t(messages, 'report.coverage.components', { percent: pct(c.componentPercent) }))}</div><div class="value">${pct(c.componentPercent)}</div><div class="meter"><span style="width:${Math.round((c.componentPercent || 0) * 100)}%"></span></div></div>
     <div class="metric"><div class="label">${escapeHtml(t(messages, 'report.coverage.nets', { percent: pct(c.netPercent) }))}</div><div class="value">${pct(c.netPercent)}</div><div class="meter"><span style="width:${Math.round((c.netPercent || 0) * 100)}%"></span></div></div>
     <div class="metric"><div class="label">Packets reviewed</div><div class="value">${(c.packetsReviewed || []).length}</div><div class="note">${escapeHtml((c.packetsFailed || []).length ? `failed: ${c.packetsFailed.length}` : '')}</div></div>
     <div class="metric"><div class="label">Suppressed</div><div class="value">${c.suppressedFindings || 0}</div><div class="note">${escapeHtml((c.skippedRules || []).map(r => r.ruleId).join(', '))}</div></div>
-  </div>${scope}`;
+  </div>${omitted}${scope}`;
 }
 
 function renderQuestions(questions, messages) {

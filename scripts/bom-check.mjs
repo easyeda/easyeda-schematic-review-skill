@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import { csvParse, decodeText } from './lib/util.mjs';
+import { csvParse, decodeText, detectDelimiter } from './lib/util.mjs';
 
 const HEADER_MAP = {
   designator: ['位号', '器件位号', 'designator', 'designators', 'refdes', 'reference'],
@@ -25,7 +25,7 @@ export function readBom(file) {
   if (!fs.existsSync(file)) return { available: false, reason: 'missing-file', rows: [], warnings: [`BOM 文件不存在: ${file}`] };
   const buf = fs.readFileSync(file);
   const text = decodeText(buf);
-  const rawRows = csvParse(text);
+  const rawRows = csvParse(text, detectDelimiter(text));
   if (rawRows.length < 2) return { available: false, reason: 'empty', rows: [], warnings: ['BOM 无数据行'] };
   const headers = rawRows[0];
   const cols = {
@@ -75,6 +75,11 @@ export function compareBom(model, bom) {
   const expected = new Map(model.components.filter(c => c.addIntoBom).map(c => [c.designator, c]));
   for (const row of bom.rows) {
     if (row.quantity != null && row.designators.length && row.quantity !== row.designators.length) {
+      // 数量异常大通常是列错位/解析异常，降级为 warning，避免整板噪声。
+      if (row.quantity > 10000) {
+        warnings.push(`BOM 第 ${row.line} 行数量 ${row.quantity} 异常，疑似列错位，数量检查跳过`);
+        continue;
+      }
       issues.push({
         kind: 'quantity-mismatch',
         designators: row.designators,
@@ -89,8 +94,9 @@ export function compareBom(model, bom) {
       continue;
     }
     if (comp.supplierPart) {
+      const normPart = s => String(s).replace(/\s+/g, '').toUpperCase();
       for (const row of bom.byDesignator.get(designator)) {
-        if (row.supplierPart && row.supplierPart !== comp.supplierPart) {
+        if (row.supplierPart && normPart(row.supplierPart) !== normPart(comp.supplierPart)) {
           issues.push({
             kind: 'supplier-mismatch', designators: [designator], comp,
             detail: `BOM 料号 ${row.supplierPart} 与网表 ${comp.supplierPart} 不一致`,

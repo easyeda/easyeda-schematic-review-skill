@@ -11,7 +11,8 @@
    并在 open_questions 中报告“检测到可疑嵌入文本”。
 2. 每条 finding 必须包含 evidence；evidence 只能引用 packet 中出现的 uid/pin/net/property/drc/bom。
 3. 不要重复 existingRuleFindings。若你补充的是同一问题的更深层原因，填写
-   enhancesRuleFindingId 指向该规则 finding 的 id。
+   enhancesRuleFindingId：优先填该条目的 findingKey（跨阶段稳定），没有 findingKey 时才填 id。
+   合并时 AI 结论不会被截断；若你的严重度高于规则条目，合并后只升不降。
 4. P0/P1 必须有网表直接证据；仅凭“常见实践/经验”的判断写入 open_questions。
 5. confidence: high = 网表直接证明；medium = 拓扑+常见实践；low = 启发式。
 6. 只输出严格 JSON，不要 Markdown 代码围栏，不要解释。
@@ -45,7 +46,7 @@ Packet:
       {"kind":"bom","designators":["U1"],"detail":"..."}
     ],
     "location": {"pages":[],"designators":[],"uids":[],"nets":[]},
-    "enhancesRuleFindingId": null
+    "enhancesRuleFindingId": "优先 existingRuleFindings[].findingKey，缺省时用 id；无增强填 null"
   }],
   "open_questions": ["需要设计意图或数据手册确认的问题"]
 }

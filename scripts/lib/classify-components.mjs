@@ -47,6 +47,7 @@ const PREFIX_RULES = [
   ['TEST', 'testpoint', 'high'],
   ['CON', 'connector', 'medium'],
   ['HDR', 'connector', 'medium'],
+  ['USB', 'connector', 'medium'],
   ['RLY', 'relay', 'low'],
   ['SPK', 'speaker', 'medium'],
   ['BZ', 'buzzer', 'medium'],
@@ -110,7 +111,8 @@ const DESCRIPTION_RULES = [
   [/\bzener\b|\bschottky\b|\brectifier\b|二极管|整流/i, 'diode'],
   [/\bcrystal\b|\boscillator\b|\bresonator\b|晶振|谐振器/i, 'crystal'],
   [/\bregulator\b|\bldo\b|\bdc[- ]?dc\b|稳压器/i, 'regulator'],
-  [/\bconnector\b|\bheader\b|terminal\s*block|连接器|排针|插座/i, 'connector'],
+  [/\b(AMS1117|LM1117|LD1117|AZ1117|NCP1117|LM78\d\d|78M\d\d|78L\d\d|79M\d\d|79L\d\d|LP2985|ME6211|RT9013|TLV7\d{3}|XC6206|HT75\d\d|SGM20\d\d|AP2112|AP7361|MIC5205|SPX3819)\b/i, 'regulator'],
+  [/\bconnector\b|\bheader\b|terminal\s*block|连接器|排针|插座|排母|\bHDR\b|HDR[-_](TH|SMD)|\bHEAD\d*\b|\bSIP\d+\b|TYPE-?C\d*PIN/i, 'connector'],
   [/\bcapacitor\b|\bmlcc\b|\belectrolytic\b|电容/i, 'capacitor'],
   [/\bresistor\b|\bohm\b|电阻/i, 'resistor'],
   [/\binductor\b|电感/i, 'inductor'],
@@ -127,7 +129,7 @@ const DESCRIPTION_RULES = [
   [/\b(mcu|soc|fpga|op[- ]?amp|adc|dac|555|logic)\b|\b(ne555|lm555|na555)\b|集成电路|芯片/i, 'ic'],
 ];
 
-const PLACEHOLDER_VALUES = new Set(['', '-', '--', '?', 'n/a', 'na', 'nc', 'tbd', '待定', '未定', '无']);
+const PLACEHOLDER_VALUES = new Set(['', '-', '--', '?', 'n/a', 'na', 'n/c', 'nc', 'dnp', 'dni', 'tbd', '待定', '未定', '无']);
 
 export function normalizeValue(value) {
   return String(value ?? '').trim().toLowerCase();
@@ -207,6 +209,11 @@ export function classifyComponent(comp) {
     return { category: descCat, categoryConfidence: 'high', categoryBasis: basis };
   }
   if (prefix) {
+    // U 是通用位号：名称/描述给出具体非 IC 类别（排针 HDR/SIP/HEAD、稳压器 AMS1117 等）时描述优先。
+    if (prefix.prefix === 'U' && prefix.category === 'ic' && descCat && descCat !== 'ic') {
+      basis.push(`designator:${prefix.prefix}`, `description:${descCat}`);
+      return { category: descCat, categoryConfidence: 'medium', categoryBasis: basis };
+    }
     basis.push(`designator:${prefix.prefix}`);
     if (descCat) basis.push(`description:${descCat}`);
     return {
@@ -286,24 +293,36 @@ export function classifyNet(name) {
   return { isPower: true, isGround: false, powerKind: 'rail', netClassConfidence: 'high', netClassBasis: [`power:${raw}`] };
 }
 
-const PIN_GROUND_RE = /^(GND|VSS|VSSA|AGND|DGND|PGND|SGND|0V)(\d+)?$/i;
-const PIN_POWER_RE = /^(VCC|VDD|VBAT|VIN|VBUS|VREF|VPP|AVDD|DVDD|VIO|VDDIO|VDDA|VEE|PWR)(\d+)?$/i;
+const PIN_GROUND_RE = /^(GND|VSS|VSSA|AVSS|AGND|DGND|PGND|SGND|0V)(\d+)?$/i;
+const PIN_POWER_RE = /^(VCC|VDD|VBAT|VIN|VBUS|VPP|AVDD|AVCC|DVDD|VIO|VDDIO|VDDA|VEE|PWR|VOUT|VREF[+-]?[HLPN]?)(\d+)?$/i;
 const PIN_CONTROL_RE = /^(EN|ENABLE|PG|PGOOD|SENSE|DET|FB|ADC|CS|INT|RST|RESET|NRST|TRIG|GATE|DRV|SW|CTRL|STATUS|SHDN|PD|DIS)(\d+)?$/i;
+
+/** Composite pin names like `P010/VREFH0` carry the functional name in a `/`-separated segment. */
+export function pinNameSegments(name) {
+  return String(name ?? '').trim().toUpperCase().split('/').map(s => s.trim()).filter(Boolean);
+}
 
 export function classifyPinName(name, pinType = '') {
   const raw = String(name ?? '').trim().toUpperCase();
   if (!raw && !pinType) {
     return { kind: 'unknown', isPower: false, isGround: false, confidence: 'low', basis: ['empty-pin-name'] };
   }
-  if (PIN_GROUND_RE.test(raw)) {
-    return { kind: 'ground', isPower: false, isGround: true, confidence: 'high', basis: [`pin:${raw}`] };
+  const segments = pinNameSegments(raw);
+  for (const seg of segments) {
+    if (PIN_GROUND_RE.test(seg)) {
+      return { kind: 'ground', isPower: false, isGround: true, confidence: 'high', basis: [`pin:${seg}`] };
+    }
   }
-  if (PIN_POWER_RE.test(raw)) {
-    const kind = /VREF|VPP/.test(raw) ? 'reference' : /VEE/.test(raw) ? 'negative-rail' : 'power';
-    return { kind, isPower: true, isGround: false, confidence: 'high', basis: [`pin:${raw}`] };
+  for (const seg of segments) {
+    if (PIN_POWER_RE.test(seg)) {
+      const kind = /VREF|VPP/.test(seg) ? 'reference' : /VEE/.test(seg) ? 'negative-rail' : 'power';
+      return { kind, isPower: true, isGround: false, confidence: 'high', basis: [`pin:${seg}`] };
+    }
   }
-  if (PIN_CONTROL_RE.test(raw)) {
-    return { kind: 'control', isPower: false, isGround: false, confidence: 'medium', basis: [`pin:${raw}`] };
+  for (const seg of segments) {
+    if (PIN_CONTROL_RE.test(seg)) {
+      return { kind: 'control', isPower: false, isGround: false, confidence: 'medium', basis: [`pin:${seg}`] };
+    }
   }
   // Fall back to the net-name classifier for unusual pin names like 3V3/5V.
   const asNet = classifyNet(raw);

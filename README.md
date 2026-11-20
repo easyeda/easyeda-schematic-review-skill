@@ -22,7 +22,7 @@ Agent Skills-compatible tools.
 
 | Capability | Description |
 | --- | --- |
-| Deterministic rules | 36 built-in checks (R001–R039) for connectivity, power/ground, interfaces, component parameters, BOM consistency, polarity, and more |
+| Deterministic rules | 55 built-in checks (R001–R060) for connectivity, power/ground, interfaces, component parameters, BOM consistency, polarity, and more |
 | AI review | Claude reviews prioritized packets of the netlist for topology- and intent-level issues that rules cannot cover |
 | Evidence-based findings | Every finding must cite a component UID, pin, net, property, DRC item, or BOM row; unsupported claims are rejected or downgraded to open questions |
 | Annotated screenshots | P0/P1 findings get a cropped schematic screenshot with a red highlight box |
@@ -212,7 +212,7 @@ Add `--no-ai` to `standard`/`strict` to keep all rules but skip the AI step.
 | `--out <dir>` | Run directory (default `tmp/schematic-review/<timestamp>`) |
 | `--no-screenshots` | Skip screenshot generation |
 | `--self-contained` | Inline screenshots as base64 into a single HTML file |
-| `--max-findings N` | Cap P2/P3 findings (P0/P1 are never truncated) |
+| `--max-findings N` | Cap P2/P3 rule findings (noise rules first); P0/P1 and AI conclusions are never truncated |
 | `--max-p0 N`, `--max-p1 N`, `--strict-exit` | CI thresholds; exit code 10 when exceeded |
 | `--fail-partial` | Exit code 6 when AI coverage is partial |
 | `--model <name>` | Review model shown in the report (or `SCHEMATIC_REVIEW_MODEL`) |
@@ -256,7 +256,7 @@ The HTML report contains:
 EasyEDA (live)  ──┐
                   ├─→ collect → parse → model.json
 design.enet ──────┘                 │
-                                    ├─→ lint (R001–R039) → lint.json
+                                    ├─→ lint (R001–R060) → lint.json
                                     ├─→ packets (power / IC / interface / passives)
                                     ├─→ AI review, one packet at a time
                                     ├─→ merge: schema + evidence validation, dedupe, sort
@@ -273,15 +273,15 @@ design.enet ──────┘                 │
 
 ### Rules at a glance
 
-The deterministic engine covers 36 rules, including:
+The deterministic engine covers 55 rules, including:
 
 | Area | Examples |
 | --- | --- |
 | Connectivity | Single-pin nets, floating pins, duplicate designators, nets with no pins |
-| Power / ground | Floating power pins, power/ground net conflicts, missing decoupling, missing supply source |
-| Interfaces | I2C pull-ups, reset pull-ups, floating BOOT pins, crystal load capacitors |
-| Component-level | LED current-limit resistors, MOSFET gate pull-downs, relay flyback diodes, regulator feedback/enable |
-| Parameters / BOM | Missing or placeholder values, missing footprints, BOM/netlist mismatches, missing part numbers |
+| Power / ground | Floating power pins, power/ground net conflicts, missing decoupling, missing supply source, isolated ground nets, regulator input/output capacitors, paralleled power outputs, power-select jumpers, VREF decoupling, MCU core-regulator caps |
+| Interfaces | I2C pull-ups, reset pull-ups, reset tied to a rail, floating BOOT pins, crystal load capacitors, UART TX/RX cross-check, CAN/RS-485 termination, SWD pair completeness, USB-C CC Rp/Rd, connector data-line ESD, cross-domain level shifts |
+| Component-level | LED current-limit resistors and current estimates, MOSFET gate pull-downs, relay flyback diodes, regulator feedback/enable, optocoupler input resistors, crystal nets routed to headers |
+| Parameters / BOM | Missing or placeholder values, missing footprints, BOM/netlist mismatches (TSV/CSV auto-detected), missing part numbers, one part number with conflicting values |
 | Polarity | Reversed LED, electrolytic capacitor, flyback diode |
 
 Severity levels:
@@ -324,6 +324,7 @@ its false-positive boundaries, and
 | Multiple EDA windows detected | Pass `--window-id <id>`; find IDs in `/eda-windows` |
 | `.net` / `.asc` / `.tel` / `.dnet` rejected | v1 supports only EasyEDA `.enet`; export a **JLCEDA** netlist |
 | No screenshots in the report | Offline mode has no geometry; live mode needs `--map-pages` for pages other than the current one |
+| Screenshot placeholder “页/器件不匹配” or “页面 SVG 与几何不匹配” | The page/component evidence check failed, or an older run's cached SVG was overwritten by another page; re-run `collect` (page keys now carry the schematic dimension). A placeholder is shown instead of a wrong red box |
 | `node: command not found` / old Node | Install Node.js 18 or newer |
 | Report has no AI findings | `quick`/`--no-ai` was used, or no AI packets were completed; check `packets/progress.json` |
 | AI review stopped halfway | Resume with `--resume --out <runDir>`, or ask Claude Code to continue; a partial report is still produced |
@@ -379,7 +380,7 @@ node --test tests/rules.test.mjs
 
 | 能力 | 说明 |
 | --- | --- |
-| 确定性规则 | 内置 36 条检查（R001–R039），覆盖连接性、电源/地、接口、器件参数、BOM 一致性、极性等 |
+| 确定性规则 | 内置 55 条检查（R001–R060），覆盖连接性、电源/地、接口、器件参数、BOM 一致性、极性等 |
 | AI 审查 | Claude 按“审查包”逐个检查网表，发现规则难以覆盖的拓扑级、意图级问题 |
 | 证据驱动 | 每条结论必须引用位号 UID、引脚、网络、属性、DRC 项或 BOM 行；无证据的结论会被拒绝或降级为待确认问题 |
 | 异常位置截图 | P0/P1 问题自动附上裁剪后的原理图截图，并用红框标出相关器件 |
@@ -565,7 +566,7 @@ node "$SKILL_DIR/scripts/review.mjs" run \
 | `--out <dir>` | 运行目录（默认 `tmp/schematic-review/<时间戳>`） |
 | `--no-screenshots` | 不生成截图 |
 | `--self-contained` | 把截图以 base64 内联成单个 HTML 文件 |
-| `--max-findings N` | 限制 P2/P3 数量（P0/P1 永不截断） |
+| `--max-findings N` | 限制 P2/P3 规则噪声数量（R020/R026 优先）；P0/P1 与 AI 结论永不截断 |
 | `--max-p0 N`、`--max-p1 N`、`--strict-exit` | CI 阈值，超限退出码 10 |
 | `--fail-partial` | AI 覆盖不完整时退出码 6 |
 | `--model <name>` | 报告中显示的审查模型（也可用 `SCHEMATIC_REVIEW_MODEL`） |
@@ -608,7 +609,7 @@ HTML 报告包含：
 EasyEDA 实时取数 ──┐
                     ├─→ collect → parse → model.json
 design.enet ────────┘                     │
-                                          ├─→ lint（R001–R039）→ lint.json
+                                          ├─→ lint（R001–R060）→ lint.json
                                           ├─→ packets（电源 / IC / 接口 / 无源件）
                                           ├─→ AI 逐包审查
                                           ├─→ merge：校验证据、去重、排序
@@ -622,15 +623,15 @@ design.enet ────────┘                     │
 
 ### 规则概览
 
-确定性规则引擎共 36 条，主要包括：
+确定性规则引擎共 55 条，主要包括：
 
 | 方向 | 示例 |
 | --- | --- |
 | 连接性 | 单引脚网络、引脚悬空、重复位号、网络无引脚 |
-| 电源/地 | 电源引脚悬空、电源与地冲突、去耦缺失、电源无来源 |
-| 接口 | I2C 上拉、复位上拉、BOOT 悬空、晶振负载电容 |
-| 器件级 | LED 限流电阻、MOSFET 栅极下拉、继电器续流二极管、稳压器反馈/使能 |
-| 参数/BOM | 缺值或占位值、缺封装、BOM/网表不一致、缺料号 |
+| 电源/地 | 电源引脚悬空、电源与地冲突、去耦缺失、电源无来源、孤立地网络、稳压器输入/输出电容、电源输出并联、电源选择跳线、VREF 去耦、MCU 内核储能电容 |
+| 接口 | I2C 上拉、复位上拉、复位脚接死电平、BOOT 悬空、晶振负载电容、UART TX/RX 交叉检查、CAN/RS-485 终端、SWD 对完整性、USB-C CC Rp/Rd、连接器数据线 ESD、跨电源域直连 |
+| 器件级 | LED 限流电阻与电流估算、MOSFET 栅极下拉、继电器续流二极管、稳压器反馈/使能、光耦输入限流、晶振节点引到排针 |
+| 参数/BOM | 缺值或占位值、缺封装、BOM/网表不一致（TSV/CSV 自动识别）、缺料号、同一料号多个值 |
 | 极性 | LED、电解电容、续流二极管方向 |
 
 级别定义：
@@ -668,6 +669,7 @@ design.enet ────────┘                     │
 | 检测到多个 EDA 窗口 | 加 `--window-id <id>`，窗口 ID 可从 `/eda-windows` 获取 |
 | `.net` / `.asc` / `.tel` / `.dnet` 被拒绝 | v1 只支持 EasyEDA `.enet`，请重新导出 **JLCEDA** 类型网表 |
 | 报告里没有截图 | 离线模式没有几何数据；实时模式下非当前图页需要加 `--map-pages` |
+| 截图占位“页/器件不匹配”或“页面 SVG 与几何不匹配” | 页/器件证据校验未通过，或旧版运行目录的缓存 SVG 被其他图页覆盖；重新 `collect` 即可（页键现已带原理图维度）。宁可占位，不画错框 |
 | 提示找不到 `node` 或版本过低 | 安装 Node.js 18 或更新版本 |
 | 没有 AI 结论 | 使用了 `quick`/`--no-ai`，或 AI 包未完成；检查 `packets/progress.json` |
 | AI 审查中途停止 | 用 `--resume --out <runDir>` 继续，或让 Claude Code 继续；已生成部分报告 |

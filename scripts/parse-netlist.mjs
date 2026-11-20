@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  readJson, writeJson, ensureDir, sha256, sanitizeFileKey, createLogger,
+  readJson, writeJson, ensureDir, sha256, sanitizeFileKey, createLogger, pageLabelOf,
 } from './lib/util.mjs';
 import {
   classifyComponent, classifyNet, dnpInfo, boolProp, isPlaceholderValue,
@@ -79,7 +79,7 @@ function normalizeGeometry(raw) {
         pageName: raw.pageName || null,
         pageFileKey: raw.pageFileKey || sanitizeFileKey(raw.pageName || pageKey),
         schematicUuid: raw.schematicUuid || null,
-        schematicName: raw.schematicName || null,
+        schematicName: raw.schematicName || raw.currentSchematic || null,
         pageWidth: raw.pageWidth ?? null,
         pageHeight: raw.pageHeight ?? null,
         svgViewBox: raw.svgViewBox || null,
@@ -157,8 +157,8 @@ export function buildModel(netlist, options = {}) {
       partClass: text(props['JLCPCB Part Class'] || ''),
       datasheet: text(props.Datasheet || ''),
       description: text(props.Description || ''),
-      addIntoBom: boolProp(props['Add into BOM'], false),
-      convertToPcb: boolProp(props['Convert to PCB'], false),
+      addIntoBom: boolProp(props['Add into BOM'], true),
+      convertToPcb: boolProp(props['Convert to PCB'], true),
       page: null,
       pins,
       props,
@@ -177,13 +177,32 @@ export function buildModel(netlist, options = {}) {
     components.push(comp);
   }
 
-  // Page mapping from geometry: uid -> pageName.
+  // 属性缺失时按普通器件（加入 BOM/PCB）处理，避免 R016/R017/R019 被整体静默跳过。
+  const missingFlags = components.filter(c =>
+    c.props['Add into BOM'] == null && c.props['Convert to PCB'] == null).length;
+  if (missingFlags) {
+    warnings.push(`${missingFlags} 个器件缺少 Add into BOM/Convert to PCB 属性，已按 yes 处理`);
+  }
+
+  // Page mapping from geometry: uid -> unique "schematic / page" label + page key.
+  // A bare pageName ("P1") is ambiguous across schematics; the label and the
+  // schematic-dimensioned pageFileKey are what packets/findings must carry.
+  // EasyEDA primitive uids are page-local: the same uid can appear on several
+  // pages as different parts, so only claim a component when the geometry
+  // designator agrees with the netlist.
   const geo = normalizeGeometry(geometry);
   if (geo) {
+    const byUid = new Map(components.map(c => [c.uid, c]));
     for (const [pageKey, page] of Object.entries(geo.pages)) {
-      for (const uid of Object.keys(page.components || {})) {
-        const comp = components.find(c => c.uid === uid);
-        if (comp) comp.page = page.pageName || pageKey;
+      const label = pageLabelOf(page) || page.pageName || pageKey;
+      const fileKey = page.pageFileKey || pageKey;
+      for (const [uid, geoComp] of Object.entries(page.components || {})) {
+        const comp = byUid.get(uid);
+        if (!comp) continue;
+        const gd = geoComp?.designator;
+        if (gd && comp.designator && gd !== comp.designator) continue;
+        comp.page = label;
+        comp.pageKey = fileKey;
       }
     }
   }

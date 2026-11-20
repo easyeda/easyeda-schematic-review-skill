@@ -52,6 +52,43 @@ export function sanitizeFileKey(input) {
   return s.slice(0, 100);
 }
 
+/** Human-readable page label: "Schematic1 / P1" (falls back to whichever part exists). */
+export function pageLabelOf(page) {
+  const pageName = page?.pageName || page?.name || null;
+  const schematicName = page?.schematicName || null;
+  if (schematicName && pageName) return `${schematicName} / ${pageName}`;
+  return pageName || schematicName || null;
+}
+
+/**
+ * Filesystem-safe page key carrying the schematic dimension, so same-named
+ * pages in different schematics never overwrite each other's geometry entry
+ * or page SVG. Keeps Unicode letters/digits (Chinese schematic/page names are
+ * common); `used` is the Set of keys already allocated in this run — a
+ * collision (e.g. two schematics with the same name) gets a short page-UUID
+ * suffix, then a numeric suffix.
+ */
+export function pageFileKeyOf(schematicName, pageName, pageUuid, used) {
+  let base = String(schematicName ? `${schematicName}__${pageName}` : (pageName ?? ''))
+    .normalize('NFKC')
+    .replace(/[\\/:*?"<>|\s]+/g, '-')
+    .replace(/[^\p{L}\p{N}_.-]+/gu, '-')
+    .replace(/-{2,}/g, '-')
+    .replace(/^[.-]+|[.-]+$/g, '')
+    .slice(0, 80);
+  if (!base) base = 'item';
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(base)) base = `_${base}`;
+  let key = base;
+  if (used?.has(key)) {
+    const suffix = String(pageUuid || '').replace(/[^\w.-]+/g, '').slice(0, 8);
+    key = `${base}__${suffix || used.size + 1}`;
+    let n = 2;
+    while (used.has(key)) key = `${base}-${n++}`;
+  }
+  used?.add(key);
+  return key;
+}
+
 export function timestampId(date = new Date()) {
   const p = (n, w = 2) => String(n).padStart(w, '0');
   return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())}-${p(date.getHours())}${p(date.getMinutes())}${p(date.getSeconds())}`;
@@ -149,7 +186,19 @@ export function levenshtein(a, b) {
   return prev[b.length];
 }
 
-export function csvParse(text) {
+/** Detect the column delimiter from the first line: EasyEDA's "csv" BOM export is actually TSV. */
+export function detectDelimiter(text) {
+  const line = String(text ?? '').split(/\r?\n/)[0] || '';
+  let best = ',';
+  let bestCount = 0;
+  for (const d of ['\t', ',', ';']) {
+    const n = line.split(d).length - 1;
+    if (n > bestCount) { best = d; bestCount = n; }
+  }
+  return best;
+}
+
+export function csvParse(text, delimiter = ',') {
   const rows = [];
   let row = [];
   let cell = '';
@@ -163,8 +212,9 @@ export function csvParse(text) {
       } else cell += ch;
       continue;
     }
-    if (ch === '"') { quoted = true; continue; }
-    if (ch === ',') { row.push(cell); cell = ''; continue; }
+    // A quote only opens a quoted field at field start; mid-field quotes are literal.
+    if (ch === '"' && cell === '') { quoted = true; continue; }
+    if (ch === delimiter) { row.push(cell); cell = ''; continue; }
     if (ch === '\r') { if (text[i + 1] === '\n') i++; row.push(cell); rows.push(row); row = []; cell = ''; continue; }
     if (ch === '\n') { row.push(cell); rows.push(row); row = []; cell = ''; continue; }
     cell += ch;
@@ -261,4 +311,28 @@ export function sortBySeverity(a, b) {
 
 export function stableHash(obj) {
   return crypto.createHash('sha1').update(JSON.stringify(obj)).digest('hex').slice(0, 12);
+}
+
+/** Evidence reference sets of a finding, used for dedup keys and scope matching. */
+export function refsOf(finding) {
+  const uids = new Set();
+  const pins = new Set();
+  const nets = new Set();
+  const designators = new Set();
+  for (const e of finding.evidence || []) {
+    if (e.uid) uids.add(e.uid);
+    if (e.designator) designators.add(e.designator);
+    if (e.kind === 'pin' && e.uid && e.pin) pins.add(`${e.uid}:${e.pin}`);
+    if (e.kind === 'net' && e.net) nets.add(e.net);
+    if (e.kind === 'drc' && e.name) nets.add(e.name);
+  }
+  return { uids, pins, nets, designators };
+}
+
+/** Stable cross-stage finding identity (lint → packets → merge); display ids are renumbered. */
+export function computeFindingKey(f) {
+  const refs = refsOf(f);
+  const keys = [...new Set([...refs.uids, ...refs.pins, ...refs.nets, ...refs.designators])].sort();
+  if (f.ruleId) return `${f.ruleId}:${stableHash(keys)}`;
+  return `${f.packetId || f.source || 'ai'}:${stableHash({ subject: f.subject || f.title, evidence: keys })}`;
 }

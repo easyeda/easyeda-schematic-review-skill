@@ -6,8 +6,8 @@
 | --- | --- |
 | 产品名 | `easyeda-schematic-review` |
 | 中文名 | 嘉立创EDA 原理图审查 |
-| 文档版本 | 0.10（实现补充 R030~R039 与完整审查清单，v1.0.0 实现基线） |
-| 日期 | 2026-11-13 |
+| 文档版本 | 0.13（截图页身份修复：页键带原理图维度、choosePage 证据校验、缓存 SVG 身份校验） |
+| 日期 | 2026-11-20 |
 | 状态 | 已定稿（Frozen），作为 v1.0.0 实现基线 |
 | 形态 | 标准 Claude Code Skill（`SKILL.md` + `scripts/` + `references/` + `assets/`） |
 | 报告形态 | **HTML 主报告**（可离线打开、带异常位置截图）+ JSON 机读报告 |
@@ -28,6 +28,9 @@
 | 0.8 | 第八轮评审：24 项闭环（quick 并入 merge、退出码优先级、i18n messageKey、geometry 采集步骤、退化 BBox、runId/findingKey、去重阈值、电源/地冲突与 R029、pins 开关、BOM 编码与列映射、pageFileKey、schema、ai-done 原子更新、多原理图范围、FR-12 责任、提示注入、AC-26 测量协议、token 系数校准等） |
 | 0.9 | 实现补充：新增 R030~R035 器件级规则；新增约 283 项完整审查清单（D/A/M/L 分类）并接入 AI 审查流程 |
 | 0.10 | 实现补充：新增 R036~R039 输出电容、LED/电解电容极性、续流二极管方向规则 |
+| 0.11 | 规则补全：新增 R040~R045（孤立地、UART 交叉、输入电容、光耦限流、总线终端、SWD 对）；修复 R016 DNP open question 死代码、R012 有源振荡器误报、R009 序号网络漏检、R014 +/- 后缀、0Ω 值归一化、R002 NC 后缀、R033/R034/R036 多引脚、R006 输出脚降级、R018 false/false 组合；BOM/PCB 标志缺失默认 yes |
+| 0.12 | 外部评审落地：新增 R046~R056/R058/R060（复位固定电平、电源输出并联、USB-C CC、内核储能电容、料号多值、电源跳线、VREF 去耦、去耦数量、数据线 ESD、跨域直连、LED 电流估算、晶振引到排针、自动网络名）；R057 预留（需器件库）、R059 实现为 open question；修复 BOM TSV 解析（嘉立创导出实为制表符分隔）、R020 端口名/短名/互补对豁免、U 前缀分类覆盖（HDR/SIP/AMS1117）、复合引脚名分段、R007 引脚名电源证据与跳线穿越、R010 RES 扩展、R016 BOM 有值降 P3、R023 提升到 standard；合并流程：单共享网络不再判重、findingKey 稳定增强、严重度只升不降、截断保护 AI 结论并优先砍噪声 |
+| 0.13 | 截图页身份修复：页键带原理图维度（保留中文、碰撞加 UUID 后缀），逐页 SVG 不再互相覆盖；`comp.page`/`location.pages`/packets 写唯一“原理图 / 图页”标签与 `pageKey`；choosePage 裁剪前校验 uid 存在性与位号一致性（EasyEDA 图元 uid 为页内局部，跨页同 uid 是不同器件），全部不匹配输出占位；capture 用 collect 记录的 `svgViewBox` 校验缓存 SVG 身份，拒绝裁剪被覆盖的旧缓存；scope `page:` 兼容裸页名/页键且忽略大小写 |
 
 ## 目录
 
@@ -266,8 +269,8 @@
 | 模式 | 规则范围 | AI | 典型用途 |
 | --- | --- | --- | --- |
 | `quick` | 确定性规则集（R001~R006、R014~R017、R026、R029） | 否 | 快速自检、CI、隐私场景 |
-| `standard` | 全部 v1 规则（R001~R020，剔除已废弃的 R021；另含 R026、R029、R030~R039） | 是 | 默认评审 |
-| `strict` | 全部规则 + strict-only（R023、R025、R027、R028） | 是 | 评审会前深度检查 |
+| `standard` | v1 核心（R001~R020，剔除废弃 R021；另含 R023、R026、R029~R043、R046~R052、R054、R056、R058） | 是 | 默认评审 |
+| `strict` | 全部规则 + strict-only（R025、R027、R028、R044、R045、R053、R055、R060） | 是 | 评审会前深度检查 |
 
 - `no_ai=true` 时，`standard`/`strict` 保留完整规则但跳过 AI；
 - `quick` 永远是规则-only，不受 `no_ai` 影响；
@@ -357,7 +360,7 @@
     );
     const svg = await file.text();
     ```
-    保存为 `page-<pageFileKey>.svg`；`pageFileKey` 复用 `fileKey` sanitize 规则（空格/中文/`/`/Windows 保留名替换）。**仅当 `map_pages=true`** 时逐页导出；逐页导出/截图会切换当前图页，结束后必须恢复原文档。
+    保存为 `page-<pageFileKey>.svg`；`pageFileKey` **必须带原理图维度**：由 `pageFileKeyOf(schematicName, pageName, pageUuid, usedKeys)` 生成 `<schematicName>__<pageName>`（保留 Unicode 字母/数字，替换文件系统非法字符与 Windows 保留名），键碰撞时追加短页 UUID 后缀（再退数字后缀），确保两个原理图的同名图页（如都叫 `P1`）不会互相覆盖 geometry 条目与 SVG。当前页同时注册 `__current__` 别名与真实键；逐页导出时跳过已采集的当前页。**仅当 `map_pages=true`** 时逐页导出；逐页导出/截图会切换当前图页，结束后必须恢复原文档。
 11. **采集 geometry**（截图用；`--no-screenshots` 时跳过）：
     - 对 `getAll('part')` 的器件分批调用 `getPrimitivesBBox`（建议每批 100~200 个 primitiveId）；
     - 生成 `geometry.pages[pageKey].components[uid].bbox`、`designatorIndex`；
@@ -577,17 +580,17 @@ node scripts/review.mjs collect --source file --netlist design.enet [--bom bom.c
 2. **证据校验**：内部一律按 `uid` 寻址；`designator` 只在展示层使用。`pin` 必须属于该 `uid`；`net` 必须存在；`property` 必须存在（或明确标注为推断）；`drc` 证据必须能对应到 `drc.json`。
 3. **拒绝无证据 finding**。
 4. **去重**：
-   - 首先按 `enhancesRuleFindingId` 关联到已有规则 finding；
-   - 其次：同 `category` 且（net 集合交集非空，或 `(uid,pin)` 集合 Jaccard ≥ 0.5）即判重；标题文本**不作为**去重键；
-   - 规则和 AI 重复时保留规则版本，并合并 AI 的解释；
+   - 首先按 `enhancesRuleFindingId` 关联到已有规则 finding：优先匹配 `findingKey`（跨阶段稳定），缺省时回退显示 `id`；
+   - 其次：同 `category` 且（`(uid,pin)` 集合 Jaccard ≥ 0.5，或共享 net/uid/pin/designator 证据合计 ≥ 2 处）才判重；**仅共享一个网络不足以判重**（同一电源轨上的不同问题，如 R007 无来源 vs AI 双输出并联，必须各自保留）；标题文本**不作为**去重键；
+   - 规则和 AI 重复时保留规则版本，并合并 AI 的解释；AI 严重度高于规则条目时**只升不降**；
 5. **排序**：`P0 > P1 > P2 > P3`；同级别按 `confidence`（high > medium > low）和证据数量排序；重复位号时按 `uid` 稳定排序。
-6. **截断**：默认 30 条；P0/P1 永不截断；被截断的 P2/P3 在报告中给出数量。
+6. **截断**：默认 30 条；P0/P1、AI 独立结论、带 AI 增强的条目**永不截断**；其余按噪声优先（R020/R026 先砍）、再 P3 后 P2 的顺序丢弃；被截断的数量按规则写入 `coverage.omittedByRule` 并在报告中注明。
 7. **来源标记**：
    - `source: "rule"`：确定性规则结果；R005 从 DRC 映射而来时仍算 `rule`，并带 `drcRule` 字段；
    - `source: "ai"`：AI 审查结果；
    - `source: "drc"`：**未映射到规则**的 DRC 原始项，只进入附录/DRC 清单，不进入正式 findings。
 8. **DRC 未映射项**：原样写入 `appendix.drc`；按 `references/drc-rules.md` 映射中/英文解释，未知 `rule` 使用“DRC 规则 <rule>（未收录，请查阅 EDA 文档）”回退，不推断为 finding。
-9. **ID 分配**：AI 包内只写临时 ID `AI-<fileKey>-NNN`；`merge` 统一重编号为 `F-001...`，按最终排序稳定分配；同时生成 `findingKey = <ruleId>:<sha1(排序后的 evidence 引用键：uid/pin/net/designator).slice(0,12)>`，**跨运行稳定**；无 uid/pin/net 的 finding（如 R026）用 designator/BOM 行键；报告链接与 localStorage 使用 `findingKey`，不使用会漂移的 `F-xxx`。
+9. **ID 分配**：AI 包内只写临时 ID `AI-<fileKey>-NNN`；`merge` 统一重编号为 `F-001...`，按最终排序稳定分配；`findingKey = <ruleId>:<sha1(排序后的 evidence 引用键：uid/pin/net/designator).slice(0,12)>` 在 **lint 输出时即分配**（packets 的 `relatedFindings` 携带该键，AI 增强据此关联），merge 沿用，**跨阶段/跨运行稳定**；无 uid/pin/net 的 finding（如 R026）用 designator/BOM 行键；报告链接与 localStorage 使用 `findingKey`，不使用会漂移的 `F-xxx`。
 10. **scope 过滤**：`lint.json` 保持全量；`merge` 按 `--scope` 生成最终 `findings.final.json`，这是唯一的 finding 过滤点。
 11. **国际化**：`lint.json` 只存 `messageKey + params`（如 `{key:"R009.title", params:{net:"SDA"}}`），不存中文散文；`report` 按 `--lang` 从 `references/messages.zh.json` / `messages.en.json` 渲染；`--lang` 同时作用于 `run`/`packets`/`report`。
 
@@ -1162,7 +1165,8 @@ metadata:
       "description": "",
       "addIntoBom": true,
       "convertToPcb": true,
-      "page": null,
+      "page": "Schematic1 / P1",
+      "pageKey": "Schematic1__P1",
       "category": "ic",
       "categoryConfidence": "high",
       "categoryBasis": ["designator:U", "pins:8", "description:NE555"],
@@ -1207,16 +1211,19 @@ metadata:
   "pinsAvailable": true,
   "geometry": {
     "currentPage": "P1",
+    "currentSchematic": "Schematic1",
     "pages": {
       "__current__": {
         "pageUuid": "1e0574050bd3e65d",
         "pageName": "P1",
-        "pageFileKey": "P1",
+        "pageFileKey": "Schematic1__P1",
+        "schematicUuid": "a1b2c3d4e5f60718",
+        "schematicName": "Schematic1",
         "pageWidth": 1170,
         "pageHeight": 825,
         "svgViewBox": "-10.5 -835.5 1191 846",
-        "svgPath": "page-P1.svg",
-        "pngPath": "page-P1.png",
+        "svgPath": "page-Schematic1__P1.svg",
+        "pngPath": "page-Schematic1__P1.png",
         "components": {
           "gge1": {"designator": "U1", "primitiveId": "abca63802e74bac8", "bbox": {"minX": 549.5, "minY": 379.5, "maxX": 640.5, "maxY": 430.5}}
         },
@@ -1241,7 +1248,7 @@ metadata:
 - 网络按 `isPower`、`isGround`、`pinCount` 降序、名称排序；
 - 所有 `props` 原样保留，便于追溯；
 - `displayValue` 用于报告展示，按 FR-03 的回退链生成；`rawValue` 始终保存原始 `props.Value`（可能为空或表达式）；`valuePlaceholder` 表示 `rawValue` 是否命中 R016 边界中的占位符集合，供 R016 直接读取；
-- `page` 默认 `null`；只有 `map_pages=true` 时才写图页名；
+- `page` 默认 `null`；有 geometry 时写唯一“原理图 / 图页”标签（如 `Schematic1 / P1`，无原理图名时退化为页名），`pageKey` 写带原理图维度的 `pageFileKey`。**图元 uid 是页内局部的**：同一 uid 在不同页是不同器件，只有 geometry 位号与网表位号一致时才认领该器件的页归属；
 - `category` / `categoryConfidence` / `categoryBasis` 按 §6.5A 生成；
 - `dnp` / `dnpConfidence` / `dnpSource` / `dnpCandidate` 按 §6.5B 生成；无法确定时 `dnp=null`、`dnpConfidence=null`、`dnpSource=null`；
 - `isPower` / `isGround` / `powerKind` / `netClassConfidence` 按 §6.5C 生成；
@@ -1278,8 +1285,8 @@ metadata:
    - 引脚名含 `DRAIN/GATE/SOURCE` → `mosfet`。
    - 引脚名含 `VBUS/CC/D+/D-` → `connector` 或 USB 接口器件。
 4. **描述/料号关键词**（不区分大小写）：
-   - `LDO|regulator|DC-DC|buck|boost|converter` → `regulator`
-   - `connector|header|socket|plug|terminal|USB|RJ45` → `connector`
+   - `LDO|regulator|DC-DC|buck|boost|converter` → `regulator`；常见稳压器料号 `AMS1117|LM1117|LD1117|AZ1117|NCP1117|LM78xx|78M/78L/79M/79Lxx|LP2985|ME6211|RT9013|TLV7xxx|XC6206|HT75xx|SGM20xx|AP2112|AP7361|MIC5205|SPX3819` → `regulator`
+   - `connector|header|socket|plug|terminal|USB|RJ45|HDR|HDR-TH/SMD|HEADn|SIPn|TYPE-CnPIN|排母` → `connector`
    - `LED|light emitting` → `led`
    - `crystal|oscillator|resonator` → `crystal`
    - `capacitor|cap|MLCC|electrolytic` → `capacitor`
@@ -1296,6 +1303,10 @@ metadata:
    - `optocoupler|opto-isolator` → `optocoupler`（按词边界匹配；`PC/OC/OPT` 只用于位号前缀，不作为描述关键词，避免命中 PCB/OCP）
    - `MCU|SoC|FPGA|op-amp|ADC|DAC|555|logic` → `ic`
 5. **封装名**：`SOP|QFN|BGA|LQFP|TSSOP|SOT-23|TO-220` → `ic`/`regulator`/`mosfet` 的辅助证据；`0402|0603|0805|1206` → 无源件辅助证据。
+
+**U 前缀特例（通用位号）**：`U` 是通用位号，默认 `ic` 只是弱证据。当名称/描述给出**具体非 IC 类别**时描述优先（`categoryConfidence: medium`）：`U1` 名为 `HDR-TH_12P` → `connector`，`U7` 名为 `SIP4` → `connector`，`U11` 名为 `AMS1117-3.3` → `regulator`。否则嘉立创库里大量排针/稳压器用 U 位号会被误判为 ic，导致 R007/R016/R023 等连锁误报。
+
+**复合引脚名**：`P010/VREFH0`、`P300/SWCLK` 等 `/` 分隔的复合名按分段匹配电源/地/控制/复位模式（`pinNameSegments`），功能段决定分类；AVCC/AVSS 分别按电源/地识别。
 
 **位号前缀提取与最长匹配**：
 
@@ -1450,7 +1461,7 @@ metadata:
 
 - 模式定义以 **FR-01** 为唯一权威；
 - 本表“模式”列表示**最低生效模式**：`quick` 列在 quick/standard/strict 都生效；`standard` 列在 standard/strict 生效；`strict` 列只在 strict 生效；
-- R007~R013、R018、R019 只在 standard/strict；R020 的 strict 差异见 §6.6A；R026/R029 标 `quick` 表示 quick 及以上都跑（BOM/DRC 不可用时跳过）；R030~R039 在 standard/strict 生效。
+- R007~R013、R018、R019 只在 standard/strict；R020 的 strict 差异见 §6.6A；R026/R029 标 `quick` 表示 quick 及以上都跑（BOM/DRC 不可用时跳过）；R023、R030~R043、R046~R052、R054、R056、R058 在 standard/strict 生效；R025、R027、R028、R044、R045、R053、R055、R060 只在 strict 生效。
 
 | ID | 规则 | 默认级别 | 置信度 | 判定要点 | 模式 | 依赖 |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -1460,25 +1471,25 @@ metadata:
 | R004 | 网络无引脚 | P2 | high | `designRule.netRule` 中的网络无任何引脚 | quick | — |
 | R005 | DRC 悬空网络 | P2 | high | DRC `SHOWDANDLING`；**网络存在或不存在都报告**；不存在时 evidence 用 `drc.primitiveId` | quick | DRC |
 | R006 | 电源/地引脚悬空 | P0/P1 | high/medium | 引脚名匹配 §6.5C 且 `net` 为空；`noConnect === true` 时降为 **P1/medium**，提示核对数据手册 | quick | §6.5C |
-| R007 | 电源网络无来源 | P2 | medium | 电源网络无连接器/稳压器/电池/无源或开关 BFS 来源（最大 5 跳） | standard | §6.5A/§6.5C |
+| R007 | 电源网络无来源 | P2 | medium | 电源网络无连接器/稳压器/电池/无源或开关 BFS 来源（最大 5 跳）；引脚名 `VBUS/VOUT/V3` 等本身即输出证据；2–3 脚全电源网络器件视为选择跳线可穿越 | standard | §6.5A/§6.5C |
 | R008 | IC 去耦缺失 | P2 | medium | `category in (ic, regulator)`；电源网络与地之间无电容（允许经磁珠/0R 一跳） | standard | §6.5A/§6.5C |
-| R009 | I2C 上拉缺失 | P1 | medium | SCL/SDA 网络无上拉到电源的电阻（含排阻；排阻拓扑不明时转 open question） | standard | §6.5A |
-| R010 | 复位上拉缺失 | P2 | medium | RESET/NRST/RST 引脚已联网但无上拉/下拉（含排阻） | standard | §6.5A |
+| R009 | I2C 上拉缺失 | P1 | medium | SCL/SDA 网络（含前后缀与序号，如 `I2C_SCL0`）无上拉到电源的电阻（含排阻；排阻拓扑不明时转 open question） | standard | §6.5A |
+| R010 | 复位上拉缺失 | P2 | medium | RESET/NRST/RST/RES/XRES/MCLR 引脚已联网但无上拉/下拉（含排阻）；直接 tied 到电源/地交由 R046；复合引脚名按 `/` 分段 | standard | §6.5A |
 | R011 | BOOT 引脚悬空 | P1 | medium | BOOT/BOOT0 引脚 `net` 为空 | standard | — |
-| R012 | 晶振负载电容缺失 | P2 | medium | `category === crystal`；两脚网络无对地电容 | standard | §6.5A |
+| R012 | 晶振负载电容缺失 | P2 | medium | `category === crystal`；信号脚网络无对地电容；接地/电源焊盘不参与；带电源脚的有源振荡器跳过 | standard | §6.5A |
 | R013 | LED 限流电阻缺失 | P1 | medium | `category === led`；以 LED 整体判定，A/K 两侧都没有串联限流路径 | standard | §6.5A |
-| R014 | 差分对不完整 | P2 | high | `differentialPair` 组只有 P 或 N，或网络不存在 | quick | — |
+| R014 | 差分对不完整 | P2 | high | `differentialPair` 组只有 P 或 N，或网络不存在；命名回退含 `_P/_N`、`_DP/_DM`、`+/-` 后缀 | quick | — |
 | R015 | 连接器电源/地悬空 | P1 | high | `category === connector`；电源/地引脚 `net` 为空 | quick | §6.5A/§6.5C |
-| R016 | 缺值/占位值 | P2 | high | `addIntoBom=true`；非 connector/testpoint；**`rawValue` 为空或含占位符**（`displayValue` 仅辅助）；`dnp !== true` | quick | §6.5A/§6.5B |
+| R016 | 缺值/占位值 | P2/P3 | high/medium | `addIntoBom=true`；非 connector/testpoint/mechanical；**`rawValue` 为空或含占位符**（`displayValue` 仅辅助）；`dnp !== true`；`dnpCandidate` 先于 BOM 过滤判定，转 open question；**BOM 已提供有效值时降 P3/medium** | quick | §6.5A/§6.5B/BOM |
 | R017 | 缺封装 | P1 | high | `convertToPcb === true` 且无 footprint | quick | — |
 | R018 | BOM/PCB 标志组合 | P2/P3 | medium | 见下方组合表；仅对非 mechanical/testpoint 生效 | standard | §6.5A |
 | R019 | 料号缺失 | P3 | medium | `addIntoBom=true` 且无 `supplierPart` | standard | — |
-| R020 | 网络名近似重复 | P3 | low | 命名网络编辑距离 ≤ 1，排除自动网络；strict 扩大模式 | standard/strict | — |
+| R020 | 网络名近似重复 | P3 | low | 命名网络编辑距离 ≤ 1，排除自动网络、端口式名（`P000`）、长度 ≤3 短名、互补后缀有意配对（DP/DN、+/-、SCL/SDA 等）；strict 扩大模式 | standard/strict | — |
 | R022 | 多页端口不匹配 | P2 | medium | 端口网络在其它页无对应连接 | ⏳ v1.1 | — |
-| R023 | 电源入口保护缺失 | P3 | low | 电源输入无保险丝/TVS/反接保护 | strict | §6.5A/§6.5C |
+| R023 | 电源入口保护缺失 | P3 | low | 电源轨被连接器触及且同网络无保险丝/TVS | standard | §6.5A/§6.5C |
 | R024 | 电容耐压不足 | P2 | medium | 需要“网络电压注释 + 电容 `Voltage Rating`”；任一缺失则跳过 | ⏳ v1.1 | §6.5C |
 | R025 | 测试点缺失 | P3 | low | 关键电源轨无测试点 | strict | §6.5A/§6.5C |
-| R026 | BOM/网表一致性 | P2 | high | BOM 位号集合/数量与 `addIntoBom=true` 器件不一致；BOM 不可用时跳过 | quick | BOM |
+| R026 | BOM/网表一致性 | P2 | high | BOM 位号集合/数量与 `addIntoBom=true` 器件不一致；自动识别 TSV/CSV 分隔符；数量 >10000 只 warning；BOM 不可用时跳过 | quick | BOM |
 | R027 | 未用运放通道 | P3 | medium | `category === ic` 且描述/引脚含 op-amp；未用通道输入悬空 | strict | §6.5A |
 | R028 | 未用逻辑门输入悬空 | P2 | medium | `category === ic` 且引脚名匹配 `^(IN\|EN\|CLK\|RST)(\d+)?$`（整词锚定），输入悬空 | strict | §6.5A |
 | R029 | 电源/地网络冲突 | P0 | high | 同一网络同时有电源模式与地模式引脚名；或两条不同电源轨经 0Ω/跳线合并 | quick | §6.5C |
@@ -1492,16 +1503,39 @@ metadata:
 | R037 | LED 极性可能反接 | P1 | high | LED 有 A/K 引脚，阳极网络为地 | standard | §6.5A |
 | R038 | 电解电容极性可能反接 | P1 | high | 极性电容正极接地或负极接电源轨 | standard | §6.5A |
 | R039 | 继电器续流二极管方向错误 | P1 | high | 线圈一端为电源，二极管阳极接在电源侧 | standard | §6.5A |
+| R040 | 孤立地网络 | P2 | medium | 地网络经 0Ω/磁珠/电感等直流通路（≤3 跳）无法到达其它地网络；`EARTH/CHASSIS/FG` 豁免；仅电容耦合不算连接 | standard | §6.5C |
+| R041 | UART 同方向引脚互连 | P1 | medium | 同一网络有 ≥2 个 TX/TXD/TXO 引脚且无 RX/RXD/RXI（或反向）；连接器/测试点不参与计数 | standard | §6.5A |
+| R042 | 稳压器输入缺少电容 | P2 | medium | `category === regulator`；IN/VIN/VI 网络与地之间无电容（允许经磁珠/0Ω/电感一跳） | standard | §6.5A |
+| R043 | 光耦输入缺少限流电阻 | P2 | medium | `category === optocoupler`；输入侧 A/K 网络无串联电阻；数字引脚 4 脚光耦按 1/2 脚推测，转 open question | standard | §6.5A |
+| R044 | CAN/RS-485 总线缺终端电阻 | P3 | low | 归一化网络名匹配 CANH/CANL、CANP/CANN、485A/485B 对，两网络间无电阻；分裂/板外终端需人工确认 | strict | — |
+| R045 | SWD 调试对不完整 | P3 | low | 设计中只有 SWDIO 或 SWCLK 之一 | strict | — |
+| R046 | 复位脚直连电源/地 | P0/P1 | medium | 复位脚（RST/NRST/RESET/RES/XRES/MCLR，复合名分段）直接接地 → P0（持续复位）；直接接电源 → P1（复位永不生效）；经电阻的正常复位电路不报 | standard | §6.5A/§6.5C |
+| R047 | 电源输出直接并联 | P1 | medium | 同一非地电源轨上 ≥2 个不同器件的输出引脚（VOUT/VO/V3/3V3OUT/5VOUT）直接并联；连接器/测试点不算源 | standard | §6.5A/§6.5C |
+| R048 | USB-C CC 缺 Rp/Rd | P1 | medium | 器件同时有 CC1/CC2 引脚；悬空或无到电源（Rp）/到地（Rd）电阻 | standard | §6.5A |
+| R049 | 内核稳压脚缺储能电容 | P1 | medium | ic/regulator 的 VCL/VCAP/VCORE/VDDCORE/VREG 脚无对地电容，或电容网络引到连接器 | standard | §6.5A |
+| R050 | 同一料号多个值 | P1 | medium | 按 Supplier/Manufacturer Part 分组出现 ≥2 个不同值；值归一化 µ→u，占位值/封装代码不参与；网表+BOM 双源按位号集合去重 | standard | BOM |
+| R051 | 电源选择跳线无默认 | P2 | medium | 2–3 脚 connector/ic/other 全部引脚在 ≥2 个不同非地电源网络；磁珠/电感等无源件不参与 | standard | §6.5A/§6.5C |
+| R052 | VREF 参考脚缺去耦 | P2 | medium | ic/regulator 的 VREFH/VREFL/VREF± 脚（含序号、复合名分段）无对地电容 | standard | §6.5A |
+| R053 | 去耦电容数量不足 | P3 | low | ic/regulator 电源引脚数（不含地/reference）> 直接对地去耦电容数；共享电容按器件去重 | strict | §6.5A |
+| R054 | 连接器数据线缺 ESD | P2 | medium | 连接器引脚网络名匹配 DP/DM/DN/USB/CANH/CANL/485A/485B/ETH 等且同网络无 tvs/ESD 器件 | standard | §6.5A |
+| R055 | 跨电源域直连 | P2 | low | 非电源网络上有 ≥2 个 ic/regulator 且电源域电压可解析且不同；多域器件/有电阻网络跳过 | strict | §6.5C |
+| R056 | LED 电流估算越界 | P3 | medium | 供电取直连轨或驱动 IC 主域；阻值按 rawValue→name→displayValue 取第一个可解析值（封装代码除外）；iMax=(V-1.8)/R、iMin=(V-3.3)/R，越出 0.5–20mA 报；域不可解析时沉默 | standard | §6.5A/§6.5C |
+| R057 | LDO 最小输出电容 | — | — | 需器件库（最小稳定容值/ESR 范围），v1 无法确定性判定 | ⏳ v1.1 | 器件库 |
+| R058 | 晶振节点引到连接器 | P3 | medium | 无源晶振信号网络同时触及连接器/排针（寄生电容）；有源振荡器跳过 | standard | §6.5A |
+| R059 | SWD 排针线序 | — | — | 无统一标准线序，网表无法证明对错；实现为 open question（连接器同时含 SWDIO/SWCLK 时提示人工核对），不占编号规则 | open question | — |
+| R060 | 连接器自动网络名 | P3 | low | 连接器 ≥2 引脚使用 `$...` 或 `^[A-Z]{1,3}\d{3,}$` 无语义名；按器件聚合 | strict | — |
 
 **R016 边界**：
 
 - `rawValue` / `displayValue` / `valuePlaceholder` 由 parse 阶段一次计算并写入 `model.json`；lint 只读取这些字段，不再二次解析 `props`；
-- 占位符集合：空串、`-`、`--`、`?`、`N/A`、`NA`、`NC`、`TBD`、`待定`、`未定`、`无`（不区分大小写；`NC` 按下方 DNP 规则处理）；
+- 占位符集合：空串、`-`、`--`、`?`、`N/A`、`NA`、`N/C`、`NC`、`DNP`、`DNI`、`TBD`、`待定`、`未定`、`无`（不区分大小写；`NC` 按下方 DNP 规则处理）；
 - 判定对象是 `rawValue`（原始 `props.Value`），不是回退后的 `displayValue`；否则 `LCSC Part Name`/`Manufacturer Part` 会让 `displayValue` 永远非空；
 - `displayValue` 仅用于辅助：若 `rawValue` 为空但 `displayValue` 也是占位符，同样报；
-- 连接器、测试点的 `NC` 不报；
+- 连接器、测试点、机械件的 `NC` 不报；
 - 值为 `NC`/`DNP`/`DNI` 且 `dnpSource === "addIntoBom"` 时，降为 open question：“该器件可能为 DNP，请确认是否贴片”；
-- 只有显式 DNP 属性为真时才完全跳过。
+- 只有显式 DNP 属性为真时才完全跳过；
+- `Add into BOM`/`Convert to PCB` 属性缺失时按 `yes` 处理（普通器件语义），并写入 `model.warnings`，避免 R016/R017/R019 被整体静默跳过；
+- **BOM 交叉核对**：BOM 已提供有效值（非占位、非封装代码如 `0805`）时，网表缺值只是标注不完整，降为 `P3/medium`（`params.inBom=yes`）；BOM 无值或不可用时维持 `P2/high`。
 
 **R002 数据可用性**：
 
@@ -1538,6 +1572,7 @@ metadata:
 **R026 BOM/网表一致性**：
 
 - 以 `addIntoBom=true` 的器件集合为基准，解析 BOM 的 `Designator` 列（逗号/空格分隔）；
+- **分隔符自动识别**：嘉立创 EDA `getBomFile('bom','csv')` 实际导出 **TSV**（制表符分隔，扩展名仍为 `.csv`）；按首行 `\t`/`,`/`;` 计数取最多者作为分隔符，带引号逗号 CSV 仍兼容；
 - **CSV 契约**：自带最小 RFC4180 解析器（不引第三方包），处理引号内逗号/换行；编码自动识别 UTF-8 BOM / GBK；
 - **列头映射**（中/英客户端）：
   | 字段 | 中文列头 | 英文列头 |
@@ -1549,12 +1584,14 @@ metadata:
 - 检查：
   - 网表有、BOM 无 → P2 “BOM 缺少位号”；
   - BOM 有、网表无 → P2 “BOM 多余位号”；
-  - 同一 BOM 行内数量与位号数不一致 → P2；
-  - `Supplier Part` 与网表不一致 → P3 提示；
+  - 同一 BOM 行内数量与位号数不一致 → P2；**数量 >10000 视为疑似列错位，只产生 warning，不产生 finding**；
+  - `Supplier Part` 与网表不一致 → P3 提示（比较忽略空白与大小写）；
 - BOM 不可用时跳过 R026，并在覆盖范围中注明；
 - BOM 存在但格式无法解析时，不崩溃，记录 warning。
 
 > **R021 为历史废弃保留号**：原“逻辑门输入悬空”已合并到 R028，不再实现；规则编号不重排，避免 fixture 引用断裂。
+> **R022/R024 为 v1.1 预留号**（多页端口、电容耐压）。**R057 预留**（LDO 最小输出电容，需器件库）。
+> **R059 不占编号规则**：SWD 排针无统一标准线序，实现为 open question。
 
 **规则抑制优先级**：
 
@@ -1562,14 +1599,20 @@ metadata:
 
 | 优先级 | 规则 | 说明 |
 | --- | --- | --- |
-| 1 | R006 | 电源/地引脚悬空（最具体） |
-| 2 | R015 | 连接器电源/地悬空 |
-| 3 | R011 | BOOT 悬空 |
-| 4 | R027/R028 | 未用运放/逻辑门输入悬空 |
-| 5 | R002 | 通用引脚悬空 |
+| 1 | R046 | 复位脚固定电平（最具体，危险极性） |
+| 2 | R048 | USB-C CC 缺 Rp/Rd |
+| 3 | R006 | 电源/地引脚悬空 |
+| 4 | R015 | 连接器电源/地悬空 |
+| 5 | R011 | BOOT 悬空 |
+| 6 | R027/R028 | 未用运放/逻辑门输入悬空 |
+| 7 | R034 | 稳压器使能脚悬空 |
+| 8 | R036/R042 | 稳压器输出/输入缺电容 |
+| 9 | R008 | IC 去耦缺失 |
+| 10 | R010 | 复位上拉缺失 |
+| 11 | R002 | 通用引脚悬空 |
 
 - 被抑制的 finding 不进入报告，但计入 `coverage.suppressedFindings`；
-- `R005` 优先于 `R004`（DRC 悬空比“网络无引脚”更具体）；
+- 网络级：`R005` 优先于 `R004` 优先于 `R001`（DRC 悬空 > 网络无引脚 > 单引脚网络）；
 - 抑制只发生在同一 `uid + pin` 或同一 `net` 上，不跨对象。
 
 **规则实现要求**：
@@ -1638,17 +1681,18 @@ metadata:
   - 连接器引脚在该网络上；
   - `category === power_source`（电池 `BT`/`BAT`）在该网络上；
   - `category === regulator` 的 `VOUT` / `OUT` / `SW` 引脚；
-  - 其他 IC 的电源输出脚（名称含 `VOUT` / `OUT` / `VBUS`）；
-- **BFS 无源/开关传递树（最大深度 5）**：从电源网络出发，经 2 脚 `ferrite`/`inductor`/`fuse`/0Ω `resistor`/`diode`（A-K）或 MOS 的 D-S 极继续遍历；遇到有源隔离（变压器、非直通 IC、非 D-S 的晶体管引脚）即停止；任一路径到达“有合法来源”的电源网络即视为有来源，并记录电源树路径；
+  - 其他 IC 的电源输出脚（名称含 `VOUT` / `OUT` / `VBUS`）；**引脚名本身即证据**：`VBUS/VOUT/VO/V3/VCORE_OUT/3V3OUT/5VOUT` 等即使器件被分类为 ic 也视为来源（CH330N V3、AMS1117 VOUT 场景）；
+- **BFS 无源/开关传递树（最大深度 5）**：从电源网络出发，经 2 脚 `ferrite`/`inductor`/`fuse`/0Ω `resistor`/`diode`（A-K）或 MOS 的 D-S 极继续遍历；**2–3 脚、全部引脚都在非地电源网络上的非无源器件视为电源选择跳线，允许穿越**（HEAD3 选 VCC 场景）；遇到有源隔离（变压器、非直通 IC、非 D-S 的晶体管引脚）即停止；任一路径到达“有合法来源”的电源网络即视为有来源，并记录电源树路径；
 - 测试点/焊盘仅在名称/描述暗示外部供电（`VIN`/`VBAT`/`PWR`/`EXT`）时作为 `low` 置信度来源候选，不作为强来源；
 - `.enet` 通常不包含独立电源符号；若找不到来源 → P2 medium，文案注明“未发现可见电源来源，电源符号可能未导出”；
 - 去耦电容不算电源来源。
 
 **R010/R011 复位/BOOT**：
 
-- 复位引脚正则：`^(RESET|RST|NRST|nRESET|RESET_N|RST_N)$`；
+- 复位引脚正则：`^(N?RST|N?RESET|RES|XRES|MCLR)(\d+|#|_N|N)?$`（覆盖瑞萨 RES 等写法）；复合引脚名（`P1/RST`）按 `/` 分段匹配；
 - BOOT 引脚正则：`^(BOOT0?|BOOT_N|BOOT_MODE\d*)$`；
 - **R010 只在引脚已连接网络（`net !== ""`）但无上拉/下拉时触发**；若 `net === ""`，交给 R002（R011/R002 抑制表处理），避免同一悬空引脚重复报 R010 + R002；
+- 连接器/测试点/机械件不参与；复位脚直接 tied 到电源/地属于固定电平，交由 R046 报危险极性，不在 R010 范围；
 - 上拉/下拉：电阻/排阻一端在引脚网络、另一端在电源或地；找不到 → finding。
 
 **R003 多部件器件**：
@@ -1685,6 +1729,8 @@ metadata:
 - standard：归一化后 Levenshtein ≤ 1；
 - strict：Levenshtein ≤ 2，或一个名称包含另一个且长度差 ≤ 2；
 - 排除自动网络（`$...`）、电源/地网络、完全相同的名称；
+- 排除端口/引脚式自动名（`^[A-Za-z]{1,4}\d+$`，如 `P000`/`UART1`）与长度 ≤3 的短名（`DN/DP/TX/RX`）；
+- 排除互补后缀的有意配对（忽略末尾序号）：`DP/DM`、`DP/DN`、`P/N`、`+/-`、`H/L`、`A/B`、`TX/RX`、`SCL/SDA`、`POS/NEG`；
 - 按归一化名称分组，报告每对可疑名称。
 
 ---
@@ -1781,7 +1827,7 @@ metadata:
 | 无 `evidence` | 拒绝 |
 | `confidence: high` 但证据只是启发式 | 降为 medium |
 | 与规则 finding 重复 | 合并，保留规则级别 |
-| 超过 `max_findings` | 截断 P2/P3，保留 P0/P1 |
+| 超过 `max_findings` | 优先砍 R020/R026 噪声，再 P3 后 P2；P0/P1、AI 结论、AI 增强条目永不截断 |
 | 引用未映射 DRC 项 | 拒绝写入 findings；只进附录 |
 
 > 脚本 `merge-findings.mjs` 是权威校验方；AI 的“自检”只是生成前过滤，不能覆盖脚本结论。
@@ -1888,7 +1934,7 @@ metadata:
           "file": "screenshots/F-001.svg",
           "png": null,
           "svg": "screenshots/F-001.svg",
-          "page": "P1",
+          "page": "Schematic1 / P1",
           "caption": "红框为 SDA 相关器件 U2、U3",
           "highlights": ["U2", "U3"],
           "viewBox": "120 -520 320 180"
@@ -2055,8 +2101,8 @@ tmp/schematic-review/<timestamp>/
 ├── screenshots/
 │   ├── F-001.svg            # 默认
 │   ├── F-001.png            # 可选（--image-format png）
-│   └── page-P1.png          # 可选整页概览
-├── page-P1.svg              # collect 缓存的页面 SVG
+│   └── page-Schematic1__P1.png  # 可选整页概览
+├── page-Schematic1__P1.svg  # collect 缓存的页面 SVG（键带原理图维度）
 ├── ai/                      # 逐包 findings.ai.<fileKey>.json
 └── ...中间产物
 ```
@@ -2311,11 +2357,17 @@ svgHeight = bbox.maxY - bbox.minY
 ```text
 输入：finding.location（uids / designators / nets / pages）、model.geometry.pages[pageKey]
 
-1. 选定 `pageKey`：若 `finding.location.pages[0]` 在 `geometry.pages` 中存在则用它；否则若存在 `geometry.pages["__current__"]` 则用 `__current__`；再否则用 `geometry.currentPage`；最后取 `page = geometry.pages[pageKey]`；
+1. 选定 `pageKey`（choosePage，**先校验、后裁剪**）：按优先级生成候选页——① `finding.location.pages` 命中的键 / `pageName` / `pageFileKey` / “原理图 / 图页”标签；② 包含 finding uid（含 nets 展开 uid）的页；③ `__current__`；④ 全部页。对每个候选页依次校验：
+   - finding 的 uid（显式 `location.uids` + nets 展开）至少一个存在于 `page.components`；
+   - **EasyEDA 图元 uid 是页内局部的**：同一 uid 在不同页是不同物理器件，所有在场 uid 的 geometry 位号必须与网表位号一致；
+   - 显式 `location.uids` 的位号还必须与 `finding.location.designators` 一致（nets 展开的邻居 uid 不受此限）；
+   - 仅带 designators 的 finding 经 `designatorIndex` 校验，且只信任网表确认的 uid（其他原理图的同名位号器件不得冒充）。
+   候选页校验不通过就继续下一个；**全部不匹配时返回占位卡片“截图不可用（页/器件不匹配）”**，宁可占位也不画错框；
    - 若 `model.geometry` 缺失、`pages` 为空、或目标 bbox 面积为 0/非法 → 直接返回占位卡片并计入 `screenshots.failed`，**不得在原点画 0 尺寸红框**；
+   - **缓存 SVG 身份校验**：SVG 根 `viewBox` 必须与 collect 时记录的 `page.svgViewBox` 一致（空白归一化后比较）；不一致说明缓存被其他图页覆盖（旧版页键不含原理图维度），返回“截图不可用（页面 SVG 与几何不匹配）”，拒绝裁剪；
 2. 收集目标器件（内部一律以 uid 为主键）：
    - uids 直接映射到 `page.components[uid].bbox`；
-   - designators 通过 `page.designatorIndex` 转成 uid；重复位号时取全部 uid；
+   - designators 通过 `page.designatorIndex` 转成 uid，**只信任网表确认的 uid**（页内局部 uid 会让其他原理图的同位号器件出现在索引里）；重复位号时取全部确认 uid；
    - nets 展开为该网络所有引脚的 uid，再映射到 bbox；**电源/地网络不展开所有引脚**，改用 `page.components` 的 1 跳邻域或 `page.drcPrimitives`；
    - DRC finding 使用 `page.drcPrimitives[primitiveId].bbox`。
    - 若 `map_pages=false` 且任一 uid 不在 `page.components` 中 → 直接返回占位卡片，不画红框。
@@ -2340,8 +2392,18 @@ import path from 'path';
 //   finding.location.pages: string[]
 //   model: model.json
 //   runDir: 本次运行目录
-const pageKey = findPageKey(finding, model); // 见 §6.10.2
-const page = model.geometry.pages[pageKey];
+const { key: pageKey, page, mismatch } = choosePage(finding, model); // 见 §6.10.2：候选页逐一校验
+if (!page) {
+  return { placeholder: mismatch ? '截图不可用（页/器件不匹配）' : '截图不可用（无几何数据）' };
+}
+const svgPath = path.join(runDir, page.svgPath);
+const svg = fs.readFileSync(svgPath, 'utf8');
+// 缓存 SVG 身份校验：旧版运行目录的 page-<页名>.svg 可能被其他原理图覆盖
+const cachedVb = (svg.match(/<svg\b[^>]*?\bviewBox\s*=\s*["']([^"']*)["']/i) || [])[1];
+const norm = s => String(s).trim().replace(/\s+/g, ' ');
+if (cachedVb && page.svgViewBox && norm(cachedVb) !== norm(page.svgViewBox)) {
+  return { placeholder: '截图不可用（页面 SVG 与几何不匹配）' };
+}
 const missing = finding.uids.filter(uid => !page.components[uid]);
 if (missing.length) {
   return { placeholder: '截图不可用（器件不在当前页，请使用 --map-pages 重新审查）' };
@@ -2366,9 +2428,6 @@ const top = -maxY - pad;
 const width = Math.max((maxX - minX) + pad * 2, 120);
 const height = Math.max((maxY - minY) + pad * 2, 120);
 const stroke = Math.max(1, Math.round(width / 200));
-
-const svgPath = path.join(runDir, page.svgPath);
-const svg = fs.readFileSync(svgPath, 'utf8');
 
 const rootMatch = svg.match(/<svg\b[^>]*>/);
 if (!rootMatch) throw new Error('SVG root not found: ' + svgPath);
@@ -2417,25 +2476,26 @@ fs.writeFileSync(
 - 默认只截当前图页；
 - 开启 `--map-pages` 时，先建立 `UID → page` 映射：
   1. 遍历 `getAllSchematicPagesInfo()`；
-  2. 对每页 `openDocument(page.uuid)`；
+  2. 对每页 `openDocument(page.uuid)`（当前页已采集，跳过）；
   3. `getAll('part', false)` 收集 `getState_UniqueId()`；
-  4. 记录 `UID → pageName`；
+  4. 记录 `UID →（“原理图 / 图页”标签, pageFileKey）`；**图元 uid 是页内局部的**，映射时只有 geometry 位号与网表位号一致才写 `comp.page`，防止其他页的同 uid 器件抢走页归属；
   5. 用 `try/finally` 恢复原图页。
-- `collect` 阶段按图页导出 `page-<name>.svg`；`capture` 只读缓存，不再切页；
-- **单页/未开启 map_pages**：只写 `geometry.pages["__current__"]`，`geometry.currentPage` 记录实际页名；
-- **每页独立坐标系**：`geometry.pages[pageName]` 至少包含：
+- `collect` 阶段按图页导出 `page-<pageFileKey>.svg`（键带原理图维度，见 §6.3 步骤 10）；`capture` 只读缓存，不再切页；
+- **单页/未开启 map_pages**：`geometry.pages` 同时写 `__current__` 别名与真实键（同一对象），`geometry.currentPage` 记录实际页名；
+- **每页独立坐标系**：`geometry.pages[pageFileKey]` 至少包含：
 
   ```json
   {
-    "pageKey": "P1",
-    "pageFileKey": "P1",
+    "pageKey": "Schematic1__P1",
+    "pageFileKey": "Schematic1__P1",
     "pageUuid": "1e0574050bd3e65d",
     "pageName": "P1",
+    "schematicName": "Schematic1",
     "pageWidth": 1170,
     "pageHeight": 825,
     "svgViewBox": "-10.5 -835.5 1191 846",
-    "svgPath": "page-P1.svg",
-    "pngPath": "page-P1.png",
+    "svgPath": "page-Schematic1__P1.svg",
+    "pngPath": "page-Schematic1__P1.png",
     "components": {
       "gge1": {"designator": "U1", "bbox": {"minX": 549.5, "minY": 379.5, "maxX": 640.5, "maxY": 430.5}}
     },
@@ -2445,8 +2505,9 @@ fs.writeFileSync(
   }
   ```
 
-- 每页 SVG 只导出/缓存一次（`page-<name>.svg`），不要把多页坐标混在一个 viewBox 里；
+- 每页 SVG 只导出/缓存一次（`page-<pageFileKey>.svg`），不要把多页坐标混在一个 viewBox 里；
 - 截图前校验：器件 BBox 必须落在该页 `svgViewBox` 的 X/Y 范围内；超出则判定为坐标不匹配，降级为整页截图并记录 warning；
+- 缓存 SVG 身份用 collect 记录的 `svgViewBox` 校验（见 §6.10.2）；旧版运行目录中被覆盖的缓存拒绝裁剪，重新 collect 即可修复；
 - 未能映射且 UID 不在当前页时，显示占位卡片“截图不可用（器件位于其他图页，请使用 --map-pages 重新审查）”，**不画红框**。
 
 #### 6.10.6 失败与降级
@@ -2456,13 +2517,15 @@ fs.writeFileSync(
 | collect 阶段 SVG 导出失败 | 在 collect 时保存整页 PNG；图注注明“整页截图” |
 | 器件 BBox 缺失 | 用固定半径估算；仍失败则占位卡片 |
 | 页面映射/导出失败 | 不截图，卡片显示“截图不可用（图页映射失败）” |
+| 页/器件不匹配（uid 不在场或位号与网表/finding 不一致） | **不画红框**；占位卡片“截图不可用（页/器件不匹配）” |
+| 缓存 SVG viewBox 与 geometry 记录不一致（旧缓存被其他页覆盖） | **不画红框**；占位卡片“截图不可用（页面 SVG 与几何不匹配）”，重新 collect 修复 |
 | 截图过大 | 改为 finding 相关器件的 1 跳邻域 |
 | `map_pages=false` 且器件不在当前页 | **不画红框**；占位卡片“截图不可用（器件位于其他图页，请使用 --map-pages 重新审查）” |
 | 图片写入失败 | 报告继续生成，卡片显示占位图 |
 
 #### 6.10.7 性能与体积
 
-- **每页 SVG 只导出一次并缓存**（`page-<name>.svg`），同一页的多个 finding 复用，不得每条 finding 重新导出；
+- **每页 SVG 只导出一次并缓存**（`page-<pageFileKey>.svg`），同一页的多个 finding 复用，不得每条 finding 重新导出；
 - **v1 默认输出裁剪后的 SVG**（`F-xxx.svg`），纯 Node 本地裁剪 + `<rect>`，不依赖 Bridge/Canvas；
 - **PNG 为 v1.1 可选**：`--image-format png` 且 Bridge 可用时走 OffscreenCanvas；Bridge 断开/离线自动回退 SVG；
 - 单张 SVG 目标 < 100 KB；可选 PNG 目标 < 300 KB；
@@ -2690,6 +2753,7 @@ node scripts/review.mjs report \
 | AI 中断/覆盖不足 | 误以为“没问题” | 逐包进度、partial 报告、覆盖率百分比 |
 | BOM 与网表不一致 | 漏料/多料 | R026 校验；BOM 不可用时注明 |
 | BOM 列头/编码随客户端语言变化 | R026 解析失败 | zh/en 列头映射；UTF-8/GBK 自动识别；解析失败只 warning |
+| BOM 扩展名 `.csv` 实为 TSV（嘉立创导出） | R026 列错位、海量误报 | 首行分隔符计数自动识别 `\t`/`,`/`;`；数量 >10000 只 warning |
 
 ---
 
@@ -2795,7 +2859,7 @@ node scripts/review.mjs report \
 | `--pins` / `--no-pins` | — | collect/run | 采集/跳过 pins.json；live 默认 `--pins` |
 | `--no-screenshots` | — | run/capture | 跳过截图 |
 | `--image-format` | — | capture | `svg`（默认）/ `png`（v1.1） |
-| `--max-findings` | — | merge | 正式 finding 上限 |
+| `--max-findings` | — | merge | 正式 finding 上限；只截断 P2/P3 规则噪声（R020/R026 优先），P0/P1 与 AI 结论永不截断 |
 | `--max-screenshots` | — | capture | P2/P3 截图上限 |
 | `--max-packets` | — | packets | 包数上限 |
 | `--packet-token-limit` | — | packets | 单包 token 上限 |

@@ -14,7 +14,7 @@
     "footprint": "", "supplierPart": "", "manufacturer": "",
     "manufacturerPart": "", "lcscPartName": "", "partClass": "",
     "datasheet": "", "description": "", "addIntoBom": true, "convertToPcb": true,
-    "page": null,
+    "page": "Schematic1 / P1", "pageKey": "Schematic1__P1",
     "category": "ic", "categoryConfidence": "high", "categoryBasis": ["designator:U"],
     "dnp": null, "dnpConfidence": null, "dnpSource": null, "dnpCandidate": false,
     "pinsAvailable": true,
@@ -34,12 +34,12 @@
     "currentPage": "P1",
     "currentSchematic": "Schematic1",
     "pages": {
-      "P1": {
-        "pageUuid": "", "pageName": "P1", "pageFileKey": "P1",
+      "Schematic1__P1": {
+        "pageUuid": "", "pageName": "P1", "pageFileKey": "Schematic1__P1",
         "schematicUuid": "", "schematicName": "Schematic1",
         "pageWidth": 1170, "pageHeight": 825,
         "svgViewBox": "-10.5 -835.5 1191 846",
-        "svgPath": "page-P1.svg", "pngPath": null,
+        "svgPath": "page-Schematic1__P1.svg", "pngPath": null,
         "components": { "gge1": { "designator": "U1", "primitiveId": "",
                                   "bbox": { "minX": 0, "minY": 0, "maxX": 1, "maxY": 1 } } },
         "designatorIndex": { "U1": ["gge1"] },
@@ -122,9 +122,11 @@
 - `screenshots[]`、`screenshotPlaceholder`；
 - `aiEnhancement`（若 AI 补充了规则 finding）。
 
-`finding.location.pages` 保存图页名称（如 `P1`），规则与 AI finding 缺省时由
-`model.components[].page` 自动推导；报告用 `geometry.pages[].schematicName`
-显示为 `Schematic1 / P1`。
+`finding.location.pages` 保存唯一“原理图 / 图页”标签（如 `Schematic1 / P1`，
+无原理图名时退化为页名），规则与 AI finding 缺省时由 `model.components[].page`
+自动推导；`comp.pageKey` 保存带原理图维度的 `pageFileKey`。图元 uid 是页内局部的，
+页归属只在 geometry 位号与网表位号一致时认领。报告筛选器直接使用这些唯一标签；
+scope `page:P1` 仍兼容裸页名与页键（忽略大小写）。
 
 `coverage` 包含 `componentPercent/netPercent`、`packetsReviewed/Skipped/Failed`、
 `partial`、`skippedRules`、`suppressedFindings`、`omittedFindings`、`omittedQuestions`。

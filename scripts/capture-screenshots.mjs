@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readJson, writeJson, readJson as rj, escapeXml, ensureDir } from './lib/util.mjs';
+import { readJson, writeJson, escapeXml, ensureDir, pageLabelOf } from './lib/util.mjs';
 
 function isFiniteBox(b) {
   return b && ['minX', 'minY', 'maxX', 'maxY'].every(k => Number.isFinite(b[k])) &&
@@ -19,42 +19,103 @@ function unionBoxes(boxes) {
   };
 }
 
-function pageLabel(page) {
-  const pageName = page?.pageName || null;
-  const schematicName = page?.schematicName || null;
-  if (schematicName && pageName) return `${schematicName} / ${pageName}`;
-  return pageName || schematicName || null;
-}
-
-function choosePage(finding, model) {
-  const pages = model.geometry?.pages || {};
-  const locPages = finding.location?.pages || [];
-  for (const p of locPages) {
-    if (pages[p]) return { key: p, page: pages[p] };
-    const hit = Object.entries(pages).find(([, page]) => page.pageName === p || page.pageFileKey === p);
-    if (hit) return { key: hit[0], page: hit[1] };
-  }
+/** UIDs the finding points at: explicit location.uids plus the pins of its nets. */
+function findingUids(finding, model) {
   const uids = new Set(finding.location?.uids || []);
-  for (const [key, page] of Object.entries(pages)) {
-    if ([...uids].some(u => page.components?.[u])) return { key, page };
-  }
-  if (pages.__current__) return { key: '__current__', page: pages.__current__ };
-  const first = Object.entries(pages)[0];
-  if (first) return { key: first[0], page: first[1] };
-  return { key: null, page: null };
-}
-
-function collectUids(finding, page, model) {
-  const uids = new Set(finding.location?.uids || []);
-  for (const d of finding.location?.designators || []) {
-    for (const u of page?.designatorIndex?.[d] || []) uids.add(u);
-  }
-  const nets = finding.location?.nets || [];
-  for (const netName of nets) {
-    const net = model.nets.find(n => n.name === netName);
+  for (const netName of finding.location?.nets || []) {
+    const net = (model.nets || []).find(n => n.name === netName);
     if (!net) continue;
     if ((net.isPower || net.isGround) && net.pins.length > 12) continue;
     for (const p of net.pins.slice(0, 12)) uids.add(p.uid);
+  }
+  return [...uids];
+}
+
+/**
+ * A candidate page is usable only when the finding's evidence actually lives
+ * there. EasyEDA primitive uids are page-local, so the same uid on another
+ * page is a different physical part: every present uid's geometry designator
+ * must agree with the netlist, and the finding's explicit uids must also
+ * agree with its designators. Net-derived neighbor uids are not required to
+ * be listed in designators. Designator-only findings fall back to the page's
+ * designatorIndex, trusting only uids the netlist confirms. Prefer a
+ * placeholder over drawing a box on a wrong page.
+ */
+function pageMatchesFinding(page, finding, model, uids) {
+  const comps = page?.components || {};
+  const designators = new Set(finding.location?.designators || []);
+  const present = uids.filter(u => comps[u]);
+  if (uids.length) {
+    if (!present.length) return false;
+    for (const u of present) {
+      const gd = comps[u]?.designator;
+      const comp = model.components.find(c => c.uid === u);
+      if (comp?.designator && gd && comp.designator !== gd) return false;
+    }
+    const explicit = (finding.location?.uids || []).filter(u => comps[u]);
+    if (explicit.length) {
+      return explicit.every(u => {
+        const gd = comps[u]?.designator;
+        return !designators.size || !gd || designators.has(gd);
+      });
+    }
+    if (designators.size) {
+      return present.some(u => designators.has(comps[u]?.designator));
+    }
+    return true;
+  }
+  for (const d of designators) {
+    const indexed = page?.designatorIndex?.[d] || [];
+    if (indexed.some(u => {
+      const comp = model.components.find(c => c.uid === u);
+      return comp && comp.designator === d;
+    })) return true;
+  }
+  // No uid/designator evidence to verify (e.g. unresolved net-only finding):
+  // allow the page; collectBoxes will placeholder if nothing can be located.
+  return !designators.size;
+}
+
+export function choosePage(finding, model) {
+  const pages = model.geometry?.pages || {};
+  const entries = Object.entries(pages);
+  if (!entries.length) return { key: null, page: null, mismatch: false };
+  const uids = findingUids(finding, model);
+  const candidates = [];
+  const push = (key, page) => {
+    if (page && !candidates.some(c => c.key === key)) candidates.push({ key, page });
+  };
+  // Priority: declared pages (key / pageName / pageFileKey / "Schematic / Page"
+  // label), then pages holding the finding's uids, then __current__, then all.
+  for (const p of finding.location?.pages || []) {
+    if (pages[p]) push(p, pages[p]);
+    for (const [key, page] of entries) {
+      if (page.pageName === p || page.pageFileKey === p || pageLabelOf(page) === p) push(key, page);
+    }
+  }
+  for (const [key, page] of entries) {
+    if (uids.some(u => page.components?.[u])) push(key, page);
+  }
+  if (pages.__current__) push('__current__', pages.__current__);
+  for (const [key, page] of entries) push(key, page);
+  // Verify each candidate; a name hit on the wrong schematic's page must not
+  // win over the page that actually contains the evidence.
+  for (const c of candidates) {
+    if (pageMatchesFinding(c.page, finding, model, uids)) return { key: c.key, page: c.page, mismatch: false };
+  }
+  return { key: null, page: null, mismatch: true };
+}
+
+function collectUids(finding, page, model) {
+  const uids = new Set(findingUids(finding, model));
+  for (const d of finding.location?.designators || []) {
+    for (const u of page?.designatorIndex?.[d] || []) {
+      // Page-local uids: another schematic's page can index the same
+      // designator to a uid the netlist does not know (or knows as a
+      // different part). Only trust netlist-confirmed uids.
+      const comp = model.components.find(c => c.uid === u);
+      if (comp && comp.designator === d) uids.add(u);
+    }
   }
   return [...uids].filter(u => page?.components?.[u]);
 }
@@ -134,15 +195,27 @@ export function captureScreenshots(options = {}) {
       skipped++;
       continue;
     }
-    const { key, page } = choosePage(finding, model);
+    const { key, page, mismatch } = choosePage(finding, model);
     if (!page) {
-      finding.screenshotPlaceholder = '截图不可用（无几何数据）';
-      failed.push({ id: finding.id, reason: 'no geometry' });
+      finding.screenshotPlaceholder = mismatch ? '截图不可用（页/器件不匹配）' : '截图不可用（无几何数据）';
+      failed.push({ id: finding.id, reason: mismatch ? 'page/component mismatch' : 'no geometry' });
       continue;
     }
     if (!page.svgPath || !fs.existsSync(path.join(outDir, page.svgPath))) {
       finding.screenshotPlaceholder = '截图不可用（页面 SVG 缺失）';
       failed.push({ id: finding.id, reason: 'no page svg' });
+      continue;
+    }
+    const svgText = fs.readFileSync(path.join(outDir, page.svgPath), 'utf8');
+    // Legacy runs collected before page keys carried the schematic dimension
+    // may have overwritten page-<name>.svg with another schematic's page.
+    // The viewBox recorded at collect time identifies which page the cache
+    // actually holds; refuse to crop a foreign page rather than draw wrong boxes.
+    const cachedVb = (svgText.match(/<svg\b[^>]*?\bviewBox\s*=\s*["']([^"']*)["']/i) || [])[1];
+    const normVb = (s) => String(s).trim().replace(/\s+/g, ' ');
+    if (cachedVb && page.svgViewBox && normVb(cachedVb) !== normVb(page.svgViewBox)) {
+      finding.screenshotPlaceholder = '截图不可用（页面 SVG 与几何不匹配）';
+      failed.push({ id: finding.id, reason: 'page svg viewBox mismatch' });
       continue;
     }
     const uids = collectUids(finding, page, model);
@@ -158,13 +231,12 @@ export function captureScreenshots(options = {}) {
       failed.push({ id: finding.id, reason: 'invalid bbox' });
       continue;
     }
-    const svgText = fs.readFileSync(path.join(outDir, page.svgPath), 'utf8');
     const cropped = cropSvg(svgText, region, boxes);
     const fileName = `screenshots/${finding.id}.svg`;
     fs.writeFileSync(path.join(outDir, fileName), cropped.svg, 'utf8');
     const labels = uids.map(u => page.components[u]?.designator).filter(Boolean);
     const captionLabel = labels.length ? labels.join('、') : ((finding.location?.nets || [])[0] || '—');
-    const label = pageLabel(page);
+    const label = pageLabelOf(page);
     finding.screenshots = [{
       id: `${finding.id}-shot-1`,
       file: fileName,

@@ -47,6 +47,7 @@ function relatedFindings(lint, uids, nets, designators) {
     return fu.some(u => uids.has(u)) || fn.some(n => nets.has(n)) || fd.some(d => designators.has(d));
   }).map(f => ({
     id: f.id || null,
+    findingKey: f.findingKey || null,
     ruleId: f.ruleId,
     severity: f.severity,
     messageKey: f.messageKey,
